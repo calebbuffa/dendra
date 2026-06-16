@@ -1,0 +1,14 @@
+[package]
+name = "fvdb-py"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "fvdb"
+crate-type = ["cdylib"]
+
+[dependencies]
+fvdb = { path = ".." }
+pyo3 = { version = "0.21", features = ["extension-module"] }
+numpy = "0.21"
+ndarray = "0.15"

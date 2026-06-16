@@ -1,0 +1,24 @@
+[build-system]
+requires = ["maturin>=1.2,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "fvdb"
+version = "0.1.0"
+description = "Fast Vector Database - High-performance vector search with Random Projection Forests"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [{ name = "Your Name", email = "your.email@example.com" }]
+keywords = [
+    "vector-search",
+    "database",
+    "similarity-search",
+    "machine-learning",
+]
+dependencies = ["numpy>=1.20"]
+
+
+[tool.maturin]
+module-name = "fvdb"
+features = ["pyo3/extension-module"]
