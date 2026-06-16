@@ -4,7 +4,7 @@
 //! - TurboQuantAdapter: Wraps TurboQuant (MSE and InnerProduct modes)
 //! - NoOpQuantizer: Pass-through for disabled quantization
 
-use super::{QuantizeError, Quantizer, TurboQuant, TurboQuantMode};
+use super::{QuantizeError, Quantizer, Dequantizer, TurboQuant, TurboQuantMode};
 use crate::math;
 use serde::{Deserialize, Serialize};
 use std::io::Write;
@@ -93,43 +93,6 @@ impl Quantizer for TurboQuantAdapter {
         Ok(out)
     }
 
-    fn inner_product_query(&self, query: &[f32], encoded: &[u8]) -> Result<f32, QuantizeError> {
-        if query.len() != self.dimension {
-            return Err(QuantizeError::DimensionMismatch {
-                expected: self.dimension,
-                received: query.len(),
-            });
-        }
-
-        if let Some(turbo) = self.turbo.as_ref() {
-            turbo.inner_product_query(query, encoded)
-        } else {
-            Err(QuantizeError::SerializationError(
-                "TurboQuant not available".to_string(),
-            ))
-        }
-    }
-
-    fn query_distance(
-        &self,
-        query: &[f32],
-        encoded: &[u8],
-        _metric: crate::distance::MetricFn,
-    ) -> Result<f32, QuantizeError> {
-        let score = self.inner_product_query(query, encoded)?;
-        Ok(1.0 - score)
-    }
-
-    fn score(&self, encoded_a: &[u8], encoded_b: &[u8]) -> Result<f32, QuantizeError> {
-        if let Some(turbo) = self.turbo.as_ref() {
-            turbo.score(encoded_a, encoded_b)
-        } else {
-            Err(QuantizeError::SerializationError(
-                "TurboQuant not available".to_string(),
-            ))
-        }
-    }
-
     fn bytes_per_vector(&self) -> usize {
         self.bytes_per_vec
     }
@@ -142,13 +105,23 @@ impl Quantizer for TurboQuantAdapter {
     }
 }
 
+impl Dequantizer for TurboQuantAdapter {
+    fn dequantize(&self, quantized: &[u8], out: &mut [f32]) -> Result<(), QuantizeError> {
+        if let Some(turbo) = self.turbo.as_ref() {
+            turbo.dequantize(quantized, out)
+        } else {
+            Err(QuantizeError::SerializationError(
+                "TurboQuant not available".to_string(),
+            ))
+        }
+    }
+}
+
 /// No-op quantizer for disabled quantization (full precision f32).
-/// Stores vectors as raw f32 bytes, and uses SIMD-accelerated
-/// dot products for the inner product and score computations.
+/// Stores and retrieves vectors as raw f32 bytes.
 #[derive(Serialize, Deserialize, Clone)]
 pub struct NoOpQuantizer;
 
-#[allow(dead_code)]
 impl NoOpQuantizer {
     pub fn new() -> Self {
         Self
@@ -164,7 +137,6 @@ impl Quantizer for NoOpQuantizer {
                 provided: out.len(),
             });
         }
-        // Bulk copy f32 bytes using bytemuck (safe, checked)
         let dst = bytemuck::cast_slice_mut(&mut out[..required]);
         dst.copy_from_slice(vector);
         Ok(())
@@ -174,67 +146,25 @@ impl Quantizer for NoOpQuantizer {
         Ok(bytemuck::cast_slice(vector).to_vec())
     }
 
-    /// SIMD-accelerated inner product between f32 query and f32 encoded bytes.
-    /// Uses `math::dot` (which uses `wide::f32x8` SIMD).
-    fn inner_product_query(&self, query: &[f32], encoded: &[u8]) -> Result<f32, QuantizeError> {
-        let dim = query.len();
-        if encoded.len() != dim * 4 {
-            return Err(QuantizeError::BufferTooSmall {
-                required: dim * 4,
-                provided: encoded.len(),
-            });
-        }
-
-        // Cast encoded bytes to f32 slice via bytemuck — safe because:
-        // 1. We verified len is dim * 4
-        // 2. bytemuck checks alignment requirements
-        let encoded_float: &[f32] = bytemuck::cast_slice(encoded);
-
-        // Use the SIMD dot product from math.rs
-        Ok(math::dot(query, encoded_float))
-    }
-
-    /// Compute distance by decoding and calling the metric function.
-    fn query_distance(
-        &self,
-        query: &[f32],
-        encoded: &[u8],
-        metric: crate::distance::MetricFn,
-    ) -> Result<f32, QuantizeError> {
-        let dim = query.len();
-        if encoded.len() != dim * 4 {
-            return Err(QuantizeError::BufferTooSmall {
-                required: dim * 4,
-                provided: encoded.len(),
-            });
-        }
-
-        // Decode f32 from bytes using bytemuck (safe, checks alignment)
-        let decoded: &[f32] = bytemuck::cast_slice(encoded);
-        metric(query, decoded).map_err(|e| QuantizeError::UnsupportedMethod(e.to_string()))
-    }
-
-    /// SIMD-accelerated dot product between two f32 vectors stored as bytes.
-    fn score(&self, encoded_a: &[u8], encoded_b: &[u8]) -> Result<f32, QuantizeError> {
-        if encoded_a.len() != encoded_b.len() || encoded_a.len() % 4 != 0 {
-            return Err(QuantizeError::BufferTooSmall {
-                required: encoded_a.len().max(encoded_b.len()),
-                provided: encoded_a.len().min(encoded_b.len()),
-            });
-        }
-
-        // Cast both to f32 slices and compute SIMD dot product
-        let a: &[f32] = bytemuck::cast_slice(encoded_a);
-        let b: &[f32] = bytemuck::cast_slice(encoded_b);
-        Ok(math::dot(a, b))
-    }
-
     fn bytes_per_vector(&self) -> usize {
         0 // Variable per vector (depends on dimension)
     }
 
     fn serialize(&self, _writer: &mut dyn Write) -> Result<(), QuantizeError> {
-        // NoOpQuantizer is stateless; nothing to serialize
         Ok(())
     }
 }
+
+impl Dequantizer for NoOpQuantizer {
+    fn dequantize(&self, quantized: &[u8], out: &mut [f32]) -> Result<(), QuantizeError> {
+        let required_bytes = out.len() * 4;
+        if quantized.len() != required_bytes {
+            return Err(QuantizeError::BufferTooSmall {
+                required: required_bytes,
+                provided: quantized.len(),
+            });
+        }
+        let src: &[f32] = bytemuck::cast_slice(quantized);
+        out.copy_from_slice(src);
+        Ok(())
+    }

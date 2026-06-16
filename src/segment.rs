@@ -1,10 +1,9 @@
 use crate::distance::MetricFn;
 use crate::err::FvdbError;
 use crate::io::{
-    SEGMENT_FORMAT_VERSION, SEGMENT_MAGIC, SegmentHeader, read_segment_header, write_segment_header,
+    read_segment_header, write_segment_header, SegmentHeader, SEGMENT_FORMAT_VERSION, SEGMENT_MAGIC,
 };
 use crate::memory::size_of_vec;
-use crate::quantization::Quantizer;
 use crate::query::Query;
 use crate::{RandomProjectionForest, RpfCandidate};
 use memmap2::Mmap;
@@ -189,27 +188,6 @@ impl Segment {
     }
 
     #[inline]
-    pub fn encoded_vector_at(&self, row: usize) -> Result<&[u8], FvdbError> {
-        if row >= self.count {
-            return Err(FvdbError::IndexOutOfBounds {
-                index: row,
-                length: self.count,
-            });
-        }
-
-        let start = row * self.vector_bytes_per_row;
-        let end = start + self.vector_bytes_per_row;
-
-        match &self.storage {
-            SegmentStorage::Owned { vectors, .. } => {
-                let raw: &[u8] = bytemuck::cast_slice(vectors.as_slice());
-                Ok(&raw[start..end])
-            }
-            SegmentStorage::Mapped { vectors_mmap, .. } => Ok(&vectors_mmap[start..end]),
-        }
-    }
-
-    #[inline]
     pub fn vector_at(&self, row: usize) -> Result<&[f32], FvdbError> {
         let raw_row_bytes = self.dim * std::mem::size_of::<f32>();
         if self.vector_bytes_per_row != raw_row_bytes {
@@ -309,76 +287,9 @@ impl Segment {
                     continue;
                 }
 
-                let candidate_vector = self.vector_at(id_idx)?;
                 let candidate_id = self.id_at(id_idx)?;
-                let distance = metric(query_vec, candidate_vector)?;
-
-                if threshold.is_some_and(|t| distance > t) {
-                    continue;
-                }
-
-                match best_map.get_mut(&candidate_id) {
-                    Some(prev) => {
-                        if distance < *prev {
-                            *prev = distance;
-                        }
-                    }
-                    None => {
-                        best_map.insert(candidate_id, distance);
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
-    pub(crate) fn query_quantized(
-        &self,
-        query: &Query,
-        max_candidates: usize,
-        quantizer: &dyn Quantizer,
-        metric: MetricFn,
-        context: &mut SegmentQueryContext,
-    ) -> Result<(), FvdbError> {
-        self.index.generate_candidates(
-            &query.vector,
-            max_candidates,
-            &mut context.candidates,
-            &mut context.queue,
-        );
-
-        context.seen = SegmentBitSet::with_capacity(self.count);
-        let best_map = &mut context.best_map;
-        let query_vec = &query.vector;
-        let threshold = query.threshold;
-
-        for candidate in context.candidates.iter() {
-            let candidate_tree =
-                self.index
-                    .tree(candidate.tree_index)
-                    .ok_or(FvdbError::InvalidTreeIndex {
-                        index: candidate.tree_index,
-                        max: self.index.len(),
-                    })?;
-
-            for tree_look_up_index in candidate.start..candidate.end {
-                let id_idx = match candidate_tree.look_up.get(tree_look_up_index) {
-                    Some(&idx) => idx as usize,
-                    None => {
-                        return Err(FvdbError::IndexOutOfBounds {
-                            index: tree_look_up_index,
-                            length: candidate_tree.look_up.len(),
-                        });
-                    }
-                };
-
-                if !context.seen.insert(id_idx) {
-                    continue;
-                }
-
-                let encoded = self.encoded_vector_at(id_idx)?;
-                let candidate_id = self.id_at(id_idx)?;
-                let distance = quantizer.query_distance(query_vec, encoded, metric)?;
+                let vector = self.vector_at(id_idx)?;
+                let distance = metric(query_vec, vector)?;
 
                 if threshold.is_some_and(|t| distance > t) {
                     continue;
@@ -402,7 +313,6 @@ impl Segment {
     pub(crate) fn flush(
         self,
         path: &Path,
-        quantizer: Option<&dyn Quantizer>,
     ) -> Result<Segment, FvdbError> {
         let start = std::time::Instant::now();
         eprintln!(
@@ -427,21 +337,9 @@ impl Segment {
             }
         };
 
-        // Determine encoding parameters
-        let (total_encoded_bytes, bytes_per_row) = if let Some(quantizer) = quantizer {
-            let rows = external_ids.len();
-            let bpr = quantizer.bytes_per_vector();
-            if bpr == 0 {
-                return Err(FvdbError::UnsupportedOperation(
-                    "quantized flush requires fixed bytes_per_vector".to_string(),
-                ));
-            }
-            (rows * bpr, bpr)
-        } else {
-            let rows = external_ids.len();
-            let bpr = self.dim * std::mem::size_of::<f32>();
-            (rows * bpr, bpr)
-        };
+        // For f32 vectors, bytes_per_row is dim * 4
+        let bytes_per_row = self.dim * std::mem::size_of::<f32>();
+        let total_encoded_bytes = external_ids.len() * bytes_per_row;
 
         let meta_start = std::time::Instant::now();
         {
@@ -462,50 +360,19 @@ impl Segment {
         );
 
         // Stream vectors in chunks to avoid allocating all at once
-        let chunk_size = 16_384; // ~16k vectors per chunk (tuned for L3 cache)
+        let chunk_size = 16_384; // ~16k vectors per chunk
         let vec_start = std::time::Instant::now();
         let mut total_chunks = 0;
         {
             let mut w = BufWriter::new(File::create(&vectors_path)?);
             let num_vectors = external_ids.len();
 
-            if let Some(quantizer) = quantizer {
-                // Streaming quantization: process in chunks
-                let mut chunk_encoded = vec![0u8; chunk_size * bytes_per_row];
-
-                for chunk_start in (0..num_vectors).step_by(chunk_size) {
-                    let chunk_end = (chunk_start + chunk_size).min(num_vectors);
-                    let chunk_len = chunk_end - chunk_start;
-                    total_chunks += 1;
-
-                    let chunk_tm = std::time::Instant::now();
-                    let vec_chunk = &vectors[chunk_start * self.dim..chunk_end * self.dim];
-                    let encoded_chunk = &mut chunk_encoded[..chunk_len * bytes_per_row];
-
-                    quantizer.batch_quantize(vec_chunk, encoded_chunk)?;
-                    let q_time = chunk_tm.elapsed().as_secs_f64() * 1000.0;
-
-                    let write_tm = std::time::Instant::now();
-                    w.write_all(encoded_chunk)?;
-                    let w_time = write_tm.elapsed().as_secs_f64() * 1000.0;
-
-                    if total_chunks % 4 == 0 {
-                        eprintln!(
-                            "    chunk {}: quant={:.1}ms, write={:.1}ms",
-                            total_chunks, q_time, w_time
-                        );
-                    }
-                }
-            } else {
-                // Non-quantized: just cast and write in chunks
-                let _chunk_bytes = chunk_size * bytes_per_row;
-                for chunk_start in (0..num_vectors).step_by(chunk_size) {
-                    let chunk_end = (chunk_start + chunk_size).min(num_vectors);
-                    total_chunks += 1;
-                    let vec_chunk = &vectors[chunk_start * self.dim..chunk_end * self.dim];
-                    let bytes: &[u8] = bytemuck::cast_slice(vec_chunk);
-                    w.write_all(bytes)?;
-                }
+            for chunk_start in (0..num_vectors).step_by(chunk_size) {
+                let chunk_end = (chunk_start + chunk_size).min(num_vectors);
+                total_chunks += 1;
+                let vec_chunk = &vectors[chunk_start * self.dim..chunk_end * self.dim];
+                let bytes: &[u8] = bytemuck::cast_slice(vec_chunk);
+                w.write_all(bytes)?;
             }
             w.flush()?;
         }
@@ -523,7 +390,7 @@ impl Segment {
             w.write_all(bytes)?;
             w.flush()?;
         }
-        let t3 = start.elapsed();
+        let _t3 = start.elapsed();
         eprintln!(
             "  [ids] {:.3}ms",
             ids_start.elapsed().as_secs_f64() * 1000.0

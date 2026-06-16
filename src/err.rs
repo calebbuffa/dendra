@@ -1,7 +1,5 @@
 use thiserror::Error;
 
-use crate::quantization::QuantizeError;
-
 #[derive(Error, Debug)]
 pub enum FvdbError {
     #[error("Zero-norm vector")]
@@ -28,8 +26,6 @@ pub enum FvdbError {
     MmapFailed(String),
     #[error("mmap size mismatch: expected {expected}, received {received}")]
     MmapSizeMismatch { expected: usize, received: usize },
-    #[error("Quantization error: {0}")]
-    QuantizationError(#[from] QuantizeError),
     #[error("Serialization error: {0}")]
     SerializationError(String),
 }

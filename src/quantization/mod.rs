@@ -133,25 +133,6 @@ pub trait Quantizer: Send + Sync {
         Ok(out)
     }
 
-    fn inner_product_query(&self, query: &[f32], encoded: &[u8]) -> Result<f32, QuantizeError> {
-        let _ = (query, encoded);
-        Err(QuantizeError::UnsupportedMethod(
-            "inner_product_query not implemented".to_string(),
-        ))
-    }
-
-    fn query_distance(
-        &self,
-        query: &[f32],
-        encoded: &[u8],
-        _metric: MetricFn,
-    ) -> Result<f32, QuantizeError> {
-        let score = self.inner_product_query(query, encoded)?;
-        Ok(score)
-    }
-
-    fn score(&self, a: &[u8], b: &[u8]) -> Result<f32, QuantizeError>;
-
     fn bytes_per_vector(&self) -> usize;
 
     fn serialize(&self, writer: &mut dyn Write) -> Result<(), QuantizeError> {

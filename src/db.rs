@@ -1,9 +1,5 @@
 use crate::err::FvdbError;
 use crate::io::read_u8_le;
-use crate::quantization::{
-    NoOpQuantizer, QuantizationConfig, Quantizer, TurboQuant, TurboQuantAdapter, TurboQuantConfig,
-    TurboQuantMode,
-};
 use crate::query::Query;
 use crate::segment::{Segment, SegmentBuilder, SegmentQueryContext};
 use serde::{Deserialize, Serialize};
@@ -27,7 +23,6 @@ pub struct VectorDBConfig {
     pub seed: u64,
     pub max_segment_capacity: usize,
     pub async_seal_queue_capacity: usize,
-    pub quantization: Option<QuantizationConfig>,
 }
 
 impl VectorDBConfig {
@@ -46,7 +41,6 @@ impl VectorDBConfig {
             seed,
             max_segment_capacity,
             async_seal_queue_capacity,
-            quantization: None,
         }
     }
 }
@@ -60,7 +54,6 @@ impl Default for VectorDBConfig {
             seed: 42,
             max_segment_capacity: DEFAULT_MAX_MB_PER_SEGMENT,
             async_seal_queue_capacity: DEFAULT_ASYNC_SEAL_QUEUE_CAPACITY,
-            quantization: Some(QuantizationConfig::default()),
         }
     }
 }
@@ -75,7 +68,6 @@ pub struct VectorDB {
     seal_tx: SyncSender<SealTask>,
     seal_result_rx: Receiver<Result<PathBuf, FvdbError>>,
     in_flight_seals: usize,
-    quantizer: Box<dyn Quantizer>,
 }
 
 struct SealTask {
@@ -84,7 +76,6 @@ struct SealTask {
     leaf_size: usize,
     num_trees: usize,
     seed: u64,
-    quantization: Option<QuantizationConfig>,
     dimension: usize,
 }
 
@@ -119,48 +110,6 @@ impl Ord for Scored {
 }
 
 impl VectorDB {
-    fn is_quantization_active(config: &Option<QuantizationConfig>) -> bool {
-        config.as_ref().is_some_and(|cfg| {
-            cfg.enabled && cfg.mode != crate::quantization::QuantizationMode::Disabled
-        })
-    }
-
-    fn make_quantizer_for(
-        dimension: usize,
-        seed: u64,
-        quantization: &Option<QuantizationConfig>,
-    ) -> Box<dyn Quantizer> {
-        if Self::is_quantization_active(quantization) {
-            match quantization {
-                Some(quant_cfg) => {
-                    let turbo_cfg = TurboQuantConfig {
-                        dim: dimension,
-                        bit_width: quant_cfg.bit_width,
-                        mode: match quant_cfg.mode {
-                            crate::quantization::QuantizationMode::Mse => TurboQuantMode::Mse,
-                            crate::quantization::QuantizationMode::InnerProduct => {
-                                TurboQuantMode::InnerProduct
-                            }
-                            crate::quantization::QuantizationMode::Disabled => TurboQuantMode::Mse,
-                        },
-                        seed: Some(seed),
-                    };
-
-                    match TurboQuant::new(turbo_cfg) {
-                        Ok(turbo) => match TurboQuantAdapter::new(turbo) {
-                            Ok(adapter) => Box::new(adapter),
-                            Err(_) => Box::new(NoOpQuantizer),
-                        },
-                        Err(_) => Box::new(NoOpQuantizer),
-                    }
-                }
-                None => Box::new(NoOpQuantizer),
-            }
-        } else {
-            Box::new(NoOpQuantizer)
-        }
-    }
-
     fn spawn_seal_worker(
         queue_capacity: usize,
     ) -> (SyncSender<SealTask>, Receiver<Result<PathBuf, FvdbError>>) {
@@ -168,31 +117,11 @@ impl VectorDB {
         let (result_tx, result_rx) = mpsc::channel::<Result<PathBuf, FvdbError>>();
 
         thread::spawn(move || {
-            let mut cached_quantizer_key: Option<(usize, u64, Option<QuantizationConfig>)> = None;
-            let mut cached_quantizer: Option<Box<dyn Quantizer>> = None;
-
             while let Ok(task) = seal_rx.recv() {
                 let result = (|| {
                     let mut builder = task.builder;
                     let segment = builder.build(task.leaf_size, task.num_trees, task.seed)?;
-
-                    let quantizer_ref: Option<&dyn Quantizer> =
-                        if Self::is_quantization_active(&task.quantization) {
-                            let key = (task.dimension, task.seed, task.quantization.clone());
-                            if cached_quantizer_key.as_ref() != Some(&key) {
-                                cached_quantizer = Some(Self::make_quantizer_for(
-                                    task.dimension,
-                                    task.seed,
-                                    &task.quantization,
-                                ));
-                                cached_quantizer_key = Some(key);
-                            }
-                            cached_quantizer.as_deref()
-                        } else {
-                            None
-                        };
-
-                    let _ = segment.flush(&task.segment_path, quantizer_ref)?;
+                    let _ = segment.flush(&task.segment_path)?;
                     Ok(task.segment_path)
                 })();
 
@@ -215,7 +144,6 @@ impl VectorDB {
             leaf_size: self.config.leaf_size,
             num_trees: self.config.num_trees,
             seed: self.config.seed,
-            quantization: self.config.quantization.clone(),
             dimension: self.config.dimension,
         };
 
@@ -266,9 +194,6 @@ impl VectorDB {
         let segment_builder = SegmentBuilder::new(config.dimension, config.max_segment_capacity);
         let (seal_tx, seal_result_rx) = Self::spawn_seal_worker(config.async_seal_queue_capacity);
 
-        let quantizer =
-            Self::make_quantizer_for(config.dimension, config.seed, &config.quantization);
-
         Self {
             segments: Vec::new(),
             dir,
@@ -278,7 +203,6 @@ impl VectorDB {
             seal_tx,
             seal_result_rx,
             in_flight_seals: 0,
-            quantizer,
         }
     }
 
@@ -326,21 +250,11 @@ impl VectorDB {
             self.config.seed,
             self.config.max_segment_capacity as u64,
             self.next_segment_id,
-            &self.config.quantization,
         );
         let config = bincode::config::standard();
         let encoded = bincode::encode_to_vec(&metadata, config)
             .map_err(|e| FvdbError::SerializationError(e.to_string()))?;
         w.write_all(&encoded)?;
-
-        // If quantized, save quantizer state
-        if Self::is_quantization_active(&self.config.quantization) {
-            let quant_path = self.dir.join("quantizer.bin");
-            let mut qw = BufWriter::new(File::create(quant_path)?);
-            self.quantizer
-                .serialize(&mut qw)
-                .map_err(|e| FvdbError::SerializationError(e.to_string()))?;
-        }
 
         Ok(())
     }
@@ -377,8 +291,7 @@ impl VectorDB {
             seed,
             max_segment_capacity,
             next_segment_id,
-            quantization,
-        ): (u32, u32, u32, u64, u64, u64, Option<QuantizationConfig>) =
+        ): (u32, u32, u32, u64, u64, u64) =
             bincode::decode_from_slice(&metadata_bytes, config)
                 .map(|(v, _)| v)
                 .map_err(|e| FvdbError::SerializationError(e.to_string()))?;
@@ -395,7 +308,6 @@ impl VectorDB {
             seed,
             max_segment_capacity,
             async_seal_queue_capacity: DEFAULT_ASYNC_SEAL_QUEUE_CAPACITY,
-            quantization,
         };
 
         // Create store with quantizer initialized
@@ -450,17 +362,7 @@ impl VectorDB {
             context.candidates.clear();
             context.queue.clear();
 
-            if Self::is_quantization_active(&self.config.quantization) {
-                let _ = segment.query_quantized(
-                    query,
-                    candidates_per_segment,
-                    self.quantizer.as_ref(),
-                    query.metric,
-                    &mut context,
-                )?;
-            } else {
-                let _ = segment.query(query, candidates_per_segment, query.metric, &mut context)?;
-            }
+            let _ = segment.query(query, candidates_per_segment, query.metric, &mut context)?;
         }
 
         let k = query.k;
