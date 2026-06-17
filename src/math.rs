@@ -1,35 +1,19 @@
 use crate::err::DendraError;
 use faer::{Mat, Stride};
+use log::debug;
 use rand::Rng;
 use rand::{SeedableRng, rngs::StdRng};
 use rand_distr::{Distribution, StandardNormal};
 use wide::f32x8;
 
-/// SIMD-accelerated dot product using `wide` crate (portable across all platforms).
-/// Processes 8 f32 values at a time with FMA.
+/// Dot product for f32 slices.
+/// Kept intentionally simple to let LLVM auto-vectorize for each target.
 #[inline(always)]
 pub fn dot(a: &[f32], b: &[f32]) -> f32 {
     let n = a.len().min(b.len());
-    let a = &a[..n];
-    let b = &b[..n];
-
-    let mut sum = f32x8::ZERO;
-
-    let a_chunks = a.chunks_exact(8);
-    let b_chunks = b.chunks_exact(8);
-
-    for (ca, cb) in a_chunks.clone().zip(b_chunks.clone()) {
-        let va = f32x8::from(ca);
-        let vb = f32x8::from(cb);
-        sum = va.mul_add(vb, sum);
-    }
-
-    let rem_a = a_chunks.remainder();
-    let rem_b = b_chunks.remainder();
-
-    let mut total: f32 = sum.reduce_add();
-    for (&x, &y) in rem_a.iter().zip(rem_b.iter()) {
-        total = x.mul_add(y, total);
+    let mut total = 0.0f32;
+    for i in 0..n {
+        total = a[i].mul_add(b[i], total);
     }
     total
 }
@@ -161,6 +145,17 @@ pub fn dot_packed_signs(projected: &[f32], signs: &[u8], len: usize) -> f32 {
     total
 }
 
+#[inline]
+pub fn l2_distance_sq(a: &[f32], b: &[f32]) -> f32 {
+    let n = a.len().min(b.len());
+    let mut sum = 0.0f32;
+    for i in 0..n {
+        let diff = a[i] - b[i];
+        sum += diff * diff;
+    }
+    sum
+}
+
 /// Compute L2 norm squared.
 #[inline]
 pub fn l2_norm_sq(a: &[f32]) -> f32 {
@@ -235,7 +230,7 @@ pub fn batch_mat_t_mul(rotation: &Mat<f32>, vectors: &[f32], dim: usize) -> Vec<
     let flat_time = flat_start.elapsed().as_secs_f64() * 1000.0;
 
     if n > 10000 {
-        eprintln!(
+        debug!(
             "      batch_mat_t_mul({} x {}): mat_create={:.1}ms, mul={:.1}ms, flatten={:.1}ms (stride={}), TOTAL={:.1}ms",
             dim,
             n,
@@ -288,7 +283,7 @@ pub fn batch_mat_mul(rotation: &Mat<f32>, vectors: &[f32], dim: usize) -> Vec<f3
     let flat_time = flat_start.elapsed().as_secs_f64() * 1000.0;
 
     if n > 10000 {
-        eprintln!(
+        debug!(
             "      batch_mat_mul({} x {}): mat_create={:.1}ms, mul={:.1}ms, flatten={:.1}ms (stride={}), TOTAL={:.1}ms",
             dim,
             n,
@@ -424,4 +419,61 @@ pub fn ln_gamma(z: f64) -> f64 {
     }
     let t = z + 7.5;
     0.5 * (2.0 * std::f64::consts::PI).ln() + (z + 0.5) * t.ln() - t + x.ln()
+}
+
+pub fn softmax_probs(values: &[f32], temperature: f32, out: &mut [f32]) {
+    if values.is_empty() {
+        return;
+    }
+
+    let inv_t = 1.0f32 / temperature.max(1e-4);
+    let max_v = values.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+
+    let mut exps = Vec::with_capacity(values.len());
+    let mut sum = 0.0f32;
+    for &v in values {
+        let e = ((v - max_v) * inv_t).exp();
+        exps.push(e);
+        sum += e;
+    }
+
+    if sum <= 0.0 || !sum.is_finite() {
+        let uniform = 1.0f32 / values.len() as f32;
+        for o in out.iter_mut() {
+            *o = uniform;
+        }
+        return;
+    }
+
+    for (i, &e) in exps.iter().enumerate() {
+        out[i] = e / sum;
+    }
+}
+
+pub fn normalized_entropy(probs: &[f32]) -> f32 {
+    if probs.len() <= 1 {
+        return 0.0;
+    }
+
+    let mut h = 0.0f32;
+    for &p in probs {
+        if p > 0.0 {
+            h -= p * p.ln();
+        }
+    }
+    let h_max = (probs.len() as f32).ln().max(1e-8);
+    (h / h_max).clamp(0.0, 1.0)
+}
+
+pub fn cosine_similarity01(a: &[f32], b: &[f32]) -> f32 {
+    if a.is_empty() || b.is_empty() {
+        return 0.5;
+    }
+    let na = l2_norm(a);
+    let nb = l2_norm(b);
+    if na <= 0.0 || nb <= 0.0 {
+        return 0.5;
+    }
+    let cosine = (dot(a, b) / (na * nb)).clamp(-1.0, 1.0);
+    0.5 * (cosine + 1.0)
 }

@@ -1,3 +1,4 @@
+use log::debug;
 use std::io::{Read, Write};
 
 use crate::{
@@ -59,7 +60,7 @@ impl Node {
             w.write_all(&p.to_le_bytes())?;
         }
         if self.projection.len() > 128 {
-            eprintln!(
+            debug!(
                 "      node proj write: {} bytes in {:.2}µs",
                 self.projection.len() * 4,
                 proj_start.elapsed().as_secs_f64() * 1_000_000.0

@@ -1,5 +1,5 @@
+use log::debug;
 use rand::{self, SeedableRng, rngs::StdRng};
-use rayon::prelude::*;
 use std::{
     collections::{HashSet, VecDeque},
     fs::File,
@@ -19,13 +19,14 @@ mod node;
 mod tree;
 
 pub(crate) use node::Node;
-pub use tree::{Candidate, Tree};
+pub use tree::{Candidate, Tree, TreeBuildPolicy};
 
 pub struct ForestBuilder {
     dim: usize,
     leaf_size: usize,
     num_trees: usize,
     seed: u64,
+    build_policy: TreeBuildPolicy,
 }
 
 impl ForestBuilder {
@@ -35,7 +36,13 @@ impl ForestBuilder {
             leaf_size,
             num_trees,
             seed,
+            build_policy: TreeBuildPolicy::default(),
         }
+    }
+
+    pub fn with_tree_build_policy(mut self, build_policy: TreeBuildPolicy) -> Self {
+        self.build_policy = build_policy;
+        self
     }
 
     pub fn build(&self, vectors: &[f32], ids: &[u32]) -> Result<Forest, DendraError> {
@@ -44,6 +51,7 @@ impl ForestBuilder {
             leaf_size: self.leaf_size,
             num_trees: self.num_trees,
             dim: self.dim,
+            build_policy: self.build_policy.clone(),
         };
         let mut forest = Forest::new(config);
         // let mut rng = StdRng::seed_from_u64(self.seed);
@@ -57,6 +65,7 @@ pub struct ForestConfig {
     pub leaf_size: usize,
     pub num_trees: usize,
     pub dim: usize,
+    pub build_policy: TreeBuildPolicy,
 }
 
 pub struct Forest {
@@ -82,7 +91,7 @@ impl Forest {
 
     pub fn save(&self, path: &Path) -> Result<(), DendraError> {
         let start = std::time::Instant::now();
-        eprintln!(
+        debug!(
             "[Forest::save] Saving {} trees to {:?}",
             self.trees.len(),
             path
@@ -99,7 +108,7 @@ impl Forest {
             let tree_start = std::time::Instant::now();
             tree.write(&mut w)?;
             if (i + 1) % 2 == 0 {
-                eprintln!(
+                debug!(
                     "  tree {}: {:.1}ms",
                     i,
                     tree_start.elapsed().as_secs_f64() * 1000.0
@@ -107,7 +116,7 @@ impl Forest {
             }
         }
         w.flush()?;
-        eprintln!(
+        debug!(
             "[Forest::save] Complete in {:.3}s",
             start.elapsed().as_secs_f64()
         );
@@ -140,6 +149,7 @@ impl Forest {
             leaf_size,
             num_trees,
             dim,
+            build_policy: TreeBuildPolicy::default(),
         };
         let mut forest = Self::new(config);
         for _ in 0..num_trees {
@@ -162,21 +172,46 @@ impl Forest {
     }
 
     pub fn build(&mut self, vectors: &[f32], ids: &[u32], dim: usize) -> Result<(), DendraError> {
+        let build_start = std::time::Instant::now();
         self.trees.clear();
         let leaf_size = self.config.leaf_size;
         let num_trees = self.config.num_trees;
         let seed = self.config.seed;
+        let build_policy = self.config.build_policy.clone();
+
+        debug!(
+            "[Forest::build] Starting: trees={} points={} dim={} leaf_size={}",
+            num_trees,
+            ids.len(),
+            dim,
+            leaf_size
+        );
 
         // Build trees in parallel; each thread gets its own seeded RNG
-        let trees: Vec<_> = (0..num_trees)
-            .into_par_iter()
+        let trees: Vec<Tree> = (0..num_trees)
+            .into_iter()
             .map(|i| {
+                let tree_start = std::time::Instant::now();
                 let mut thread_rng = StdRng::seed_from_u64(seed.wrapping_add(i as u64));
-                Tree::builder(dim, leaf_size).build(vectors, ids, &mut thread_rng)
+                let tree = Tree::builder(dim, leaf_size)
+                    .with_policy(build_policy.clone())
+                    .build(vectors, ids, &mut thread_rng)?;
+                debug!(
+                    "  [Forest::build] tree={} done in {:.1}ms (nodes={}, lookups={})",
+                    i,
+                    tree_start.elapsed().as_secs_f64() * 1000.0,
+                    tree.nodes.len(),
+                    tree.look_up.len()
+                );
+                Ok(tree)
             })
-            .collect::<Result<_, _>>()?;
+            .collect::<Result<Vec<_>, DendraError>>()?;
 
         self.trees = trees;
+        debug!(
+            "[Forest::build] Complete in {:.3}s",
+            build_start.elapsed().as_secs_f64()
+        );
         Ok(())
     }
     pub fn generate_candidates(

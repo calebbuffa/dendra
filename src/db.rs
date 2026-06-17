@@ -31,14 +31,20 @@ impl VectorDB {
         self.engine.save()
     }
 
-    pub fn load(dir: &Path) -> Result<Self, DendraError> {
+    pub fn load(dir: &Path, num_workers: usize) -> Result<Self, DendraError> {
         Ok(Self {
-            engine: Engine::load(dir)?,
+            engine: Engine::load(dir, num_workers)?,
             index: VectorIndex::new(),
         })
     }
 
     pub fn query(&self, query: &Query, results: &mut Vec<(u32, f32)>) -> Result<bool, DendraError> {
-        self.index.query(self.engine.segments(), query, results)
+        self.index.query(
+            self.engine.segments(),
+            self.engine.segment_summaries(),
+            &self.engine.config.routing_policy,
+            query,
+            results,
+        )
     }
 }

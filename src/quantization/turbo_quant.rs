@@ -347,7 +347,7 @@ impl Quantizer for TurboQuant {
         let bytes_per = self.expected_quantized_len();
         let n = vectors.len() / dim;
 
-        eprintln!(
+        debug!(
             "[batch_quantize] Starting: {} vectors, {} dim, {} bytes_per_vec",
             n, dim, bytes_per
         );
@@ -376,7 +376,7 @@ impl Quantizer for TurboQuant {
                 unit_vectors[base + j] = slice[j] * inv;
             }
         }
-        eprintln!(
+        debug!(
             "  Phase 1 (norms/normalize): {:.3}ms",
             p1_start.elapsed().as_secs_f64() * 1000.0
         );
@@ -384,7 +384,7 @@ impl Quantizer for TurboQuant {
         // Phase 2: rotate all vectors at once: rotated = Pi^T * unit_vectors
         let p2_start = std::time::Instant::now();
         let rotated = crate::math::batch_mat_t_mul(&self.rotation, &unit_vectors, dim);
-        eprintln!(
+        debug!(
             "  Phase 2 (batch_mat_t_mul rotation): {:.3}ms",
             p2_start.elapsed().as_secs_f64() * 1000.0
         );
@@ -407,7 +407,7 @@ impl Quantizer for TurboQuant {
                     Self::dequantize_scalar_with_book(&self.inlier_codebook, idx);
             }
         }
-        eprintln!(
+        debug!(
             "  Phase 3 (scalar quantization): {:.3}ms",
             p3_start.elapsed().as_secs_f64() * 1000.0
         );
@@ -422,7 +422,7 @@ impl Quantizer for TurboQuant {
             let dst = &mut output[i * bytes_per..i * bytes_per + packed_bytes];
             dst.copy_from_slice(&packed);
         }
-        eprintln!(
+        debug!(
             "  Phase 4 (pack indices): {:.3}ms",
             p4_start.elapsed().as_secs_f64() * 1000.0
         );
@@ -431,12 +431,12 @@ impl Quantizer for TurboQuant {
         // OPTIMIZED: Batch all residual projections into ONE matrix multiply instead of n individual calls
         if self.cfg.mode == TurboQuantMode::InnerProduct {
             let p5_start = std::time::Instant::now();
-            eprintln!("  Phase 5 (InnerProduct QJL) starting...");
+            debug!("  Phase 5 (InnerProduct QJL) starting...");
 
             // Compute MSE reconstructions in one batch: recon_unit = Pi * recon_rotated
             let p5a_start = std::time::Instant::now();
             let recon_unit = crate::math::batch_mat_mul(&self.rotation, &recon_rotated, dim);
-            eprintln!(
+            debug!(
                 "    5a (batch_mat_mul recon): {:.3}ms",
                 p5a_start.elapsed().as_secs_f64() * 1000.0
             );
@@ -462,7 +462,7 @@ impl Quantizer for TurboQuant {
                 }
                 residual_norms[i] = res_norm_sq.sqrt();
             }
-            eprintln!(
+            debug!(
                 "    5b (compute residuals): {:.3}ms",
                 p5b_start.elapsed().as_secs_f64() * 1000.0
             );
@@ -472,7 +472,7 @@ impl Quantizer for TurboQuant {
             // For n=100k, this is 100k->1 reduction in matrix multiply operations
             let p5c_start = std::time::Instant::now();
             let all_projected = crate::math::batch_mat_mul(projection, &all_residuals, dim);
-            eprintln!(
+            debug!(
                 "    5c (batch_mat_mul projection): {:.3}ms",
                 p5c_start.elapsed().as_secs_f64() * 1000.0
             );
@@ -500,11 +500,11 @@ impl Quantizer for TurboQuant {
                 let dst = &mut output[i * bytes_per + norm_off..i * bytes_per + norm_off + 4];
                 dst.copy_from_slice(&residual_norms[i].to_le_bytes());
             }
-            eprintln!(
+            debug!(
                 "    5d (encode signs/norms): {:.3}ms",
                 p5d_start.elapsed().as_secs_f64() * 1000.0
             );
-            eprintln!(
+            debug!(
                 "  Phase 5 (total): {:.3}ms",
                 p5_start.elapsed().as_secs_f64() * 1000.0
             );
@@ -517,11 +517,11 @@ impl Quantizer for TurboQuant {
             let dst = &mut output[i * bytes_per + norm_off..i * bytes_per + norm_off + 4];
             dst.copy_from_slice(&norms[i].to_le_bytes());
         }
-        eprintln!(
+        debug!(
             "  Phase 6 (store norms): {:.3}ms",
             p6_start.elapsed().as_secs_f64() * 1000.0
         );
-        eprintln!(
+        debug!(
             "[batch_quantize] Complete in {:.3}s",
             batch_start.elapsed().as_secs_f64()
         );

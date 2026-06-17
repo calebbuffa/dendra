@@ -22,7 +22,7 @@ where
     TTask: Send + 'static,
     TResult: Send + 'static,
 {
-    task_tx: SyncSender<TTask>,
+    task_tx: Option<SyncSender<TTask>>,
     result_rx: Receiver<TResult>,
     workers: Vec<JoinHandle<()>>,
 }
@@ -75,7 +75,7 @@ where
         drop(result_tx);
 
         Self {
-            task_tx,
+            task_tx: Some(task_tx),
             result_rx,
             workers,
         }
@@ -85,16 +85,22 @@ where
     pub(crate) fn submit(&self, task: TTask) -> Result<(), TaskSystemError> {
         debug!("Task submitted to queue");
         self.task_tx
+            .as_ref()
+            .ok_or(TaskSystemError::Disconnected)?
             .send(task)
             .map_err(|_: SendError<TTask>| TaskSystemError::Disconnected)
     }
 
     /// Non-blocking submit.
     pub(crate) fn try_submit(&self, task: TTask) -> Result<(), TaskSystemError> {
-        self.task_tx.try_send(task).map_err(|e| match e {
-            TrySendError::Full(_) => TaskSystemError::QueueFull,
-            TrySendError::Disconnected(_) => TaskSystemError::Disconnected,
-        })
+        self.task_tx
+            .as_ref()
+            .ok_or(TaskSystemError::Disconnected)?
+            .try_send(task)
+            .map_err(|e| match e {
+                TrySendError::Full(_) => TaskSystemError::QueueFull,
+                TrySendError::Disconnected(_) => TaskSystemError::Disconnected,
+            })
     }
 
     /// Blocking receive for next completed result.
@@ -120,7 +126,10 @@ where
 
     /// Cloneable sender for submitting tasks from other owners/threads.
     pub(crate) fn task_sender(&self) -> SyncSender<TTask> {
-        self.task_tx.clone()
+        self.task_tx
+            .as_ref()
+            .expect("task sender requested after shutdown")
+            .clone()
     }
 
     /// Number of worker threads.
@@ -135,6 +144,8 @@ where
     TResult: Send + 'static,
 {
     fn drop(&mut self) {
+        // Close task channel first so workers unblock from recv() and can exit.
+        self.task_tx.take();
         for handle in self.workers.drain(..) {
             let _ = handle.join();
         }

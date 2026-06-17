@@ -1,59 +1,5 @@
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
-
-/// Per-segment statistics for compaction decisions.
-#[derive(Clone)]
-pub struct SegmentStats {
-    pub segment_id: u64,
-    pub vector_count: usize,
-    pub dimension: usize,
-    pub created_at: u64, // unix timestamp in seconds
-    pub query_visit_count: Arc<AtomicU64>,
-    pub centroid: Vec<f32>, // mean of all vectors for overlap detection
-}
-
-impl SegmentStats {
-    pub fn new(segment_id: u64, vector_count: usize, dimension: usize, centroid: Vec<f32>) -> Self {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-
-        Self {
-            segment_id,
-            vector_count,
-            dimension,
-            created_at: now,
-            query_visit_count: Arc::new(AtomicU64::new(0)),
-            centroid,
-        }
-    }
-
-    pub fn age_secs(&self) -> u64 {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        now.saturating_sub(self.created_at)
-    }
-
-    pub fn size_bytes(&self) -> usize {
-        self.vector_count * self.dimension * std::mem::size_of::<f32>()
-    }
-
-    pub fn size_mb(&self) -> f32 {
-        self.size_bytes() as f32 / (1024.0 * 1024.0)
-    }
-
-    pub fn visit_count(&self) -> u64 {
-        self.query_visit_count.load(Ordering::Relaxed)
-    }
-
-    pub fn record_visit(&self) {
-        self.query_visit_count.fetch_add(1, Ordering::Relaxed);
-    }
-}
+use crate::core::SegmentSummary;
+use crate::math;
 
 /// Compaction cost estimate.
 #[derive(Debug, Clone)]
@@ -68,11 +14,11 @@ pub struct MergeCostEstimate {
 pub trait CompactionPolicy: Send + 'static {
     /// Score a segment for compaction urgency (higher = more urgent).
     /// Range: [0.0, 1.0] where 1.0 is "must merge now".
-    fn score_segment(&self, stats: &SegmentStats, all_stats: &[SegmentStats]) -> f32;
+    fn score_segment(&self, stats: &SegmentSummary, all_stats: &[SegmentSummary]) -> f32;
 
     /// Select which segments to merge.
     /// Returns Some(vec of segment IDs) if a merge should happen, None otherwise.
-    fn select_merge_candidates(&self, all_stats: &[SegmentStats]) -> Option<Vec<u64>>;
+    fn select_merge_candidates(&self, all_stats: &[SegmentSummary]) -> Option<Vec<u64>>;
 }
 
 /// Size-tiered compaction: merge when too many small segments.
@@ -108,7 +54,7 @@ impl Default for SizeTieredPolicy {
 }
 
 impl CompactionPolicy for SizeTieredPolicy {
-    fn score_segment(&self, _stats: &SegmentStats, all_stats: &[SegmentStats]) -> f32 {
+    fn score_segment(&self, _stats: &SegmentSummary, all_stats: &[SegmentSummary]) -> f32 {
         if all_stats.len() < self.min_segment_count {
             return 0.0;
         }
@@ -120,7 +66,7 @@ impl CompactionPolicy for SizeTieredPolicy {
         (pressure - 1.0).max(0.0).min(1.0)
     }
 
-    fn select_merge_candidates(&self, all_stats: &[SegmentStats]) -> Option<Vec<u64>> {
+    fn select_merge_candidates(&self, all_stats: &[SegmentSummary]) -> Option<Vec<u64>> {
         if all_stats.len() < self.min_segment_count {
             return None;
         }
@@ -143,15 +89,17 @@ impl CompactionPolicy for SizeTieredPolicy {
 /// Similarity-aware compaction: merge overlapping segments.
 /// Reduces traversal redundancy by consolidating similar vectors.
 pub struct SimilarityAwarePolicy {
-    pub overlap_threshold: f32, // 0.0-1.0; merge if overlap > threshold
-    pub min_segments_to_keep: usize,
+    // Max cosine distance allowed for merge; lower means stricter merges.
+    pub overlap_threshold: f32,
+    // Do not merge segments above this heterogeneity level.
+    pub max_merge_entropy: f32,
 }
 
 impl SimilarityAwarePolicy {
-    pub fn new(overlap_threshold: f32, min_segments_to_keep: usize) -> Self {
+    pub fn new(overlap_threshold: f32) -> Self {
         Self {
             overlap_threshold,
-            min_segments_to_keep,
+            max_merge_entropy: 0.6,
         }
     }
 }
@@ -159,42 +107,55 @@ impl SimilarityAwarePolicy {
 impl Default for SimilarityAwarePolicy {
     fn default() -> Self {
         Self {
-            overlap_threshold: 0.7,
-            min_segments_to_keep: 1,
+            overlap_threshold: 0.1,
+            max_merge_entropy: 0.6,
         }
     }
 }
 
 impl CompactionPolicy for SimilarityAwarePolicy {
-    fn score_segment(&self, stats: &SegmentStats, all_stats: &[SegmentStats]) -> f32 {
-        if all_stats.len() <= self.min_segments_to_keep {
+    fn score_segment(&self, stats: &SegmentSummary, all_stats: &[SegmentSummary]) -> f32 {
+        if all_stats.len() < 2 {
             return 0.0;
         }
 
-        // Score based on overlap with other segments
+        // Score based on cosine distance to other segment centroids.
         let avg_overlap = all_stats
             .iter()
             .filter(|s| s.segment_id != stats.segment_id)
-            .map(|s| centroid_distance(&stats.centroid, &s.centroid))
+            .map(|s| centroid_cosine_distance(&stats.centroid, &s.centroid))
             .sum::<f32>()
             / (all_stats.len() as f32 - 1.0);
 
-        // Higher overlap = higher merge score
-        (avg_overlap - self.overlap_threshold).max(0.0).min(1.0)
+        // High-entropy segments are risky merge targets: keep urgency low.
+        let entropy_factor = (1.0 - stats.entropy).clamp(0.0, 1.0);
+
+        // Lower distance than threshold means stronger overlap => higher urgency.
+        if self.overlap_threshold <= 0.0 {
+            return 0.0;
+        }
+        (((self.overlap_threshold - avg_overlap) / self.overlap_threshold) * entropy_factor)
+            .max(0.0)
+            .min(1.0)
     }
 
-    fn select_merge_candidates(&self, all_stats: &[SegmentStats]) -> Option<Vec<u64>> {
-        if all_stats.len() <= self.min_segments_to_keep {
+    fn select_merge_candidates(&self, all_stats: &[SegmentSummary]) -> Option<Vec<u64>> {
+        if all_stats.len() < 2 {
             return None;
         }
 
-        // Find the most similar pair
+        // Find the most similar low-entropy pair.
         let mut best_pair = None;
         let mut best_distance = f32::INFINITY;
 
         for i in 0..all_stats.len() {
             for j in (i + 1)..all_stats.len() {
-                let dist = centroid_distance(&all_stats[i].centroid, &all_stats[j].centroid);
+                if all_stats[i].entropy > self.max_merge_entropy
+                    || all_stats[j].entropy > self.max_merge_entropy
+                {
+                    continue;
+                }
+                let dist = centroid_cosine_distance(&all_stats[i].centroid, &all_stats[j].centroid);
                 if dist < best_distance {
                     best_distance = dist;
                     best_pair = Some((i, j));
@@ -210,6 +171,19 @@ impl CompactionPolicy for SimilarityAwarePolicy {
 
         None
     }
+}
+
+fn centroid_cosine_distance(a: &[f32], b: &[f32]) -> f32 {
+    if a.is_empty() || b.is_empty() {
+        return 1.0;
+    }
+    let na = math::l2_norm(a);
+    let nb = math::l2_norm(b);
+    if na == 0.0 || nb == 0.0 {
+        return 1.0;
+    }
+    let cosine = (math::dot(a, b) / (na * nb)).clamp(-1.0, 1.0);
+    1.0 - cosine
 }
 
 /// Query-driven compaction: merge based on co-access patterns.
@@ -238,7 +212,7 @@ impl Default for QueryDrivenPolicy {
 }
 
 impl CompactionPolicy for QueryDrivenPolicy {
-    fn score_segment(&self, stats: &SegmentStats, all_stats: &[SegmentStats]) -> f32 {
+    fn score_segment(&self, stats: &SegmentSummary, all_stats: &[SegmentSummary]) -> f32 {
         if all_stats.len() <= self.min_segments_to_keep {
             return 0.0;
         }
@@ -260,7 +234,7 @@ impl CompactionPolicy for QueryDrivenPolicy {
         }
     }
 
-    fn select_merge_candidates(&self, all_stats: &[SegmentStats]) -> Option<Vec<u64>> {
+    fn select_merge_candidates(&self, all_stats: &[SegmentSummary]) -> Option<Vec<u64>> {
         if all_stats.len() <= self.min_segments_to_keep {
             return None;
         }
@@ -285,7 +259,7 @@ impl CompactionPolicy for QueryDrivenPolicy {
             if i == least_visited_idx {
                 continue;
             }
-            let dist = centroid_distance(&least_visited.centroid, &stats.centroid);
+            let dist = math::l2_distance_sq(&least_visited.centroid, &stats.centroid);
             if dist < closest_distance {
                 closest_distance = dist;
                 closest_idx = i;
@@ -301,8 +275,8 @@ impl CompactionPolicy for QueryDrivenPolicy {
 
 /// Estimate the cost of merging specific segments.
 pub fn estimate_merge_cost(
-    segments_to_merge: &[SegmentStats],
-    all_segments: &[SegmentStats],
+    segments_to_merge: &[SegmentSummary],
+    all_segments: &[SegmentSummary],
 ) -> MergeCostEstimate {
     let before_count = all_segments.len();
     let after_count = before_count - segments_to_merge.len() + 1;
@@ -319,7 +293,7 @@ pub fn estimate_merge_cost(
                             .iter()
                             .any(|m| m.segment_id == s.segment_id)
                     })
-                    .map(|s| centroid_distance(&segments_to_merge[i].centroid, &s.centroid))
+                    .map(|s| math::l2_distance_sq(&segments_to_merge[i].centroid, &s.centroid))
                     .sum::<f32>()
                     / (all_segments.len() as f32)
             })
@@ -329,7 +303,7 @@ pub fn estimate_merge_cost(
         0.0
     };
 
-    let overlap_reduction = (1.0 - avg_overlap_before).max(0.0);
+    let overlap_reduction = (1.0f32 - avg_overlap_before).max(0.0f32);
 
     // Estimate rebuild cost (rough: 1ms per 10M vectors)
     let total_vectors: usize = segments_to_merge.iter().map(|s| s.vector_count).sum();
@@ -345,37 +319,23 @@ pub fn estimate_merge_cost(
     }
 }
 
-/// Compute centroid distance (L2 norm between centroids).
-fn centroid_distance(c1: &[f32], c2: &[f32]) -> f32 {
-    if c1.is_empty() || c2.is_empty() {
-        return f32::INFINITY;
-    }
-
-    let mut sum = 0.0;
-    for (v1, v2) in c1.iter().zip(c2.iter()) {
-        let diff = v1 - v2;
-        sum += diff * diff;
-    }
-    sum.sqrt()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn make_stats(id: u64, count: usize, dim: usize) -> SegmentStats {
-        SegmentStats::new(id, count, dim, vec![0.5; dim])
+    fn make_stats(id: u64, count: usize, dim: usize, radius: f32) -> SegmentSummary {
+        SegmentSummary::new(id, count, dim, vec![0.5; dim], radius, 0.2)
     }
 
     #[test]
     fn test_size_tiered_policy() {
         let policy = SizeTieredPolicy::default();
         let stats = vec![
-            make_stats(1, 100, 128),
-            make_stats(2, 100, 128),
-            make_stats(3, 100, 128),
-            make_stats(4, 100, 128),
-            make_stats(5, 1000, 128),
+            make_stats(1, 100, 128, 0.5),
+            make_stats(2, 100, 128, 0.5),
+            make_stats(3, 100, 128, 0.5),
+            make_stats(4, 100, 128, 0.5),
+            make_stats(5, 1000, 128, 1.0),
         ];
 
         let candidates = policy.select_merge_candidates(&stats);
@@ -385,7 +345,7 @@ mod tests {
     #[test]
     fn test_similarity_aware_policy() {
         let policy = SimilarityAwarePolicy::default();
-        let stats = vec![make_stats(1, 100, 128), make_stats(2, 100, 128)];
+        let stats = vec![make_stats(1, 100, 128, 0.5), make_stats(2, 100, 128, 0.5)];
 
         let candidates = policy.select_merge_candidates(&stats);
         assert!(candidates.is_some());

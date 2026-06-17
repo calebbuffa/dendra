@@ -1,6 +1,7 @@
-use super::compaction_policy::{CompactionPolicy, SegmentStats, SizeTieredPolicy};
-use super::compaction_policy::{QueryDrivenPolicy, SimilarityAwarePolicy};
-use super::segment::{Segment, SegmentBuilder};
+use super::compaction_policy::{
+    CompactionPolicy, QueryDrivenPolicy, SimilarityAwarePolicy, SizeTieredPolicy,
+};
+use super::segment::{Segment, SegmentBuilder, SegmentSummary};
 use super::task_system::TaskSystem;
 use crate::err::DendraError;
 use crate::io::read_u8_le;
@@ -40,6 +41,27 @@ impl Default for CompactionPolicyType {
     }
 }
 
+/// Serializable query routing selection.
+#[derive(Serialize, Deserialize, Clone)]
+pub enum RoutingPolicyType {
+    /// Disable routing and search all segments.
+    Disabled,
+    /// Search only the top-N most promising segments.
+    FlatTopK {
+        max_segments: usize,
+        min_segments: usize,
+    },
+}
+
+impl Default for RoutingPolicyType {
+    fn default() -> Self {
+        Self::FlatTopK {
+            max_segments: 8,
+            min_segments: 2,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct EngineConfig {
     pub leaf_size: usize,
@@ -48,19 +70,23 @@ pub struct EngineConfig {
     pub seed: u64,
     pub max_segment_capacity: usize,
     pub async_seal_queue_capacity: usize,
+    pub num_workers: usize,
     pub compaction_policy: CompactionPolicyType,
+    pub routing_policy: RoutingPolicyType,
 }
 
 impl Default for EngineConfig {
     fn default() -> Self {
         Self {
-            leaf_size: 32,
-            num_trees: 4,
+            leaf_size: 64,
+            num_trees: 2,
             dimension: 128,
             seed: 42,
             max_segment_capacity: DEFAULT_MAX_MB_PER_SEGMENT,
             async_seal_queue_capacity: DEFAULT_ASYNC_SEAL_QUEUE_CAPACITY,
+            num_workers: 4,
             compaction_policy: CompactionPolicyType::default(),
+            routing_policy: RoutingPolicyType::default(),
         }
     }
 }
@@ -87,6 +113,11 @@ impl EngineConfig {
 
     pub fn with_compaction_policy(mut self, policy: CompactionPolicyType) -> Self {
         self.compaction_policy = policy;
+        self
+    }
+
+    pub fn with_routing_policy(mut self, policy: RoutingPolicyType) -> Self {
+        self.routing_policy = policy;
         self
     }
 }
@@ -135,7 +166,7 @@ pub(crate) struct Engine {
 
     segments: Vec<Segment>,
     segment_ids: Vec<u64>,
-    segment_stats: Vec<SegmentStats>,
+    segment_stats: Vec<SegmentSummary>,
 
     tasks: TaskSystem<StorageTask, Result<StorageTaskResult, DendraError>>,
     in_flight_tasks: usize,
@@ -149,7 +180,7 @@ impl Engine {
         let segment_builder = SegmentBuilder::new(config.dimension, config.max_segment_capacity);
         let tasks = TaskSystem::new(
             config.async_seal_queue_capacity,
-            1,
+            config.num_workers,
             |task: StorageTask| -> Result<StorageTaskResult, DendraError> {
                 match task {
                     StorageTask::Seal(t) => {
@@ -213,7 +244,7 @@ impl Engine {
             CompactionPolicyType::SimilarityAware { overlap_threshold } => {
                 Box::new(SimilarityAwarePolicy {
                     overlap_threshold: *overlap_threshold,
-                    min_segments_to_keep: 1,
+                    max_merge_entropy: 0.6,
                 })
             }
             CompactionPolicyType::QueryDriven {
@@ -278,7 +309,7 @@ impl Engine {
         Ok(())
     }
 
-    pub(crate) fn load(dir: &Path) -> Result<Self, DendraError> {
+    pub(crate) fn load(dir: &Path, num_workers: usize) -> Result<Self, DendraError> {
         let meta_path = dir.join("store.bin");
         let mut r = BufReader::new(File::open(meta_path)?);
 
@@ -320,7 +351,9 @@ impl Engine {
             seed,
             max_segment_capacity: max_segment_capacity as usize,
             async_seal_queue_capacity: DEFAULT_ASYNC_SEAL_QUEUE_CAPACITY,
+            num_workers,
             compaction_policy: CompactionPolicyType::default(),
+            routing_policy: RoutingPolicyType::default(),
         };
 
         let mut engine = Self::new(dir.to_path_buf(), cfg);
@@ -363,6 +396,10 @@ impl Engine {
 
     pub(crate) fn segments(&self) -> &[Segment] {
         &self.segments
+    }
+
+    pub(crate) fn segment_summaries(&self) -> &[SegmentSummary] {
+        &self.segment_stats
     }
 
     pub(crate) fn maintenance_tick(&mut self) -> Result<(), DendraError> {
@@ -498,10 +535,14 @@ impl Engine {
                 info!("Seal completed for segment {}", segment_id);
                 let seg = Segment::open(&segment_path)?;
 
-                // Compute centroid for this segment
-                let centroid = self.compute_segment_centroid(&seg)?;
+                // Compute centroid and radius for this segment
+                let mut centroid = vec![0.0; seg.dim];
+                let mut radius = 0.0;
+                seg.describe(&mut centroid, &mut radius)?;
+                let entropy = seg.estimate_entropy()?;
 
-                let stats = SegmentStats::new(segment_id, seg.count, seg.dim, centroid);
+                let stats =
+                    SegmentSummary::new(segment_id, seg.count, seg.dim, centroid, radius, entropy);
                 self.segment_ids.push(segment_id);
                 self.segments.push(seg);
                 self.segment_stats.push(stats);
@@ -524,9 +565,18 @@ impl Engine {
                 let old_set = old_segment_ids.iter().copied().collect::<HashSet<_>>();
 
                 let new_seg = Segment::open(&segment_path)?;
-                let centroid = self.compute_segment_centroid(&new_seg)?;
-                let new_stats =
-                    SegmentStats::new(new_segment_id, new_seg.count, new_seg.dim, centroid);
+                let mut centroid = vec![0.0; new_seg.dim];
+                let mut radius = 0.0;
+                new_seg.describe(&mut centroid, &mut radius)?;
+                let entropy = new_seg.estimate_entropy()?;
+                let new_stats = SegmentSummary::new(
+                    new_segment_id,
+                    new_seg.count,
+                    new_seg.dim,
+                    centroid,
+                    radius,
+                    entropy,
+                );
 
                 let mut new_ids = Vec::with_capacity(self.segment_ids.len());
                 let mut new_segments = Vec::with_capacity(self.segments.len());
@@ -587,24 +637,5 @@ impl Engine {
             self.maybe_schedule_compaction()?;
         }
         Ok(())
-    }
-
-    fn compute_segment_centroid(&self, segment: &Segment) -> Result<Vec<f32>, DendraError> {
-        let mut centroid = vec![0.0; segment.dim];
-
-        for i in 0..segment.count {
-            let vec = segment.vector_at(i)?;
-            for (j, &val) in vec.iter().enumerate() {
-                centroid[j] += val;
-            }
-        }
-
-        // Normalize
-        let count = segment.count as f32;
-        for val in centroid.iter_mut() {
-            *val /= count;
-        }
-
-        Ok(centroid)
     }
 }

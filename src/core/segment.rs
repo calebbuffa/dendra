@@ -1,16 +1,183 @@
-use crate::core::memory::size_of_vec;
-use crate::distance::MetricFn;
-use crate::err::DendraError;
-use crate::io::{
-    SEGMENT_FORMAT_VERSION, SEGMENT_MAGIC, SegmentHeader, read_segment_header, write_segment_header,
+use crate::{
+    core::memory::size_of_vec,
+    distance::MetricFn,
+    err::DendraError,
+    index::{IndexCandidate, RpfIndex, SegmentIndex},
+    math,
+    query::Query,
 };
-use crate::query::Query;
-use crate::{RpfCandidate, RpfIndex};
+use log::debug;
 use memmap2::Mmap;
 use std::collections::{HashMap, VecDeque};
 use std::fs::{self, File};
-use std::io::{BufWriter, Write};
+use std::io::{BufWriter, Read, Write};
 use std::path::Path;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+pub const SEGMENT_MAGIC: [u8; 4] = *b"SEGM";
+pub const SEGMENT_FORMAT_VERSION: u8 = 1;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct SegmentHeader {
+    pub magic: [u8; 4],
+    pub format_version: u8,
+    pub flags: u8,
+    pub reserved0: u16,
+    pub dim: u32,
+    pub count: u64,
+    pub vectors_bytes: u64,
+    pub ids_bytes: u64,
+    pub index_bytes: u64,
+}
+
+impl SegmentHeader {
+    pub fn new(
+        dim: usize,
+        count: usize,
+        vectors_bytes: u64,
+        ids_bytes: u64,
+        index_bytes: u64,
+    ) -> Self {
+        Self {
+            magic: SEGMENT_MAGIC,
+            format_version: SEGMENT_FORMAT_VERSION,
+            flags: 0,
+            reserved0: 0,
+            dim: dim as u32,
+            count: count as u64,
+            vectors_bytes,
+            ids_bytes,
+            index_bytes,
+        }
+    }
+
+    fn write_to<W: Write>(&self, w: &mut W) -> Result<(), DendraError> {
+        w.write_all(&self.magic)?;
+        w.write_all(&[self.format_version])?;
+        w.write_all(&[self.flags])?;
+        w.write_all(&self.reserved0.to_le_bytes())?;
+        w.write_all(&self.dim.to_le_bytes())?;
+        w.write_all(&self.count.to_le_bytes())?;
+        w.write_all(&self.vectors_bytes.to_le_bytes())?;
+        w.write_all(&self.ids_bytes.to_le_bytes())?;
+        w.write_all(&self.index_bytes.to_le_bytes())?;
+        Ok(())
+    }
+
+    fn read_from<R: Read>(r: &mut R) -> Result<Self, DendraError> {
+        let mut magic = [0u8; 4];
+        r.read_exact(&mut magic)?;
+
+        let mut b1 = [0u8; 1];
+        r.read_exact(&mut b1)?;
+        let format_version = b1[0];
+
+        r.read_exact(&mut b1)?;
+        let flags = b1[0];
+
+        let mut b2 = [0u8; 2];
+        r.read_exact(&mut b2)?;
+        let reserved0 = u16::from_le_bytes(b2);
+
+        let mut b4 = [0u8; 4];
+        r.read_exact(&mut b4)?;
+        let dim = u32::from_le_bytes(b4);
+
+        let mut b8 = [0u8; 8];
+        r.read_exact(&mut b8)?;
+        let count = u64::from_le_bytes(b8);
+
+        r.read_exact(&mut b8)?;
+        let vectors_bytes = u64::from_le_bytes(b8);
+
+        r.read_exact(&mut b8)?;
+        let ids_bytes = u64::from_le_bytes(b8);
+
+        r.read_exact(&mut b8)?;
+        let index_bytes = u64::from_le_bytes(b8);
+
+        Ok(Self {
+            magic,
+            format_version,
+            flags,
+            reserved0,
+            dim,
+            count,
+            vectors_bytes,
+            ids_bytes,
+            index_bytes,
+        })
+    }
+}
+
+/// Per-segment statistics for compaction decisions.
+#[derive(Clone)]
+pub(crate) struct SegmentSummary {
+    pub segment_id: u64,
+    pub vector_count: usize,
+    pub dimension: usize,
+    pub created_at: u64, // unix timestamp in seconds
+    pub query_visit_count: Arc<AtomicU64>,
+    pub centroid: Vec<f32>, // mean of all vectors for overlap detection
+    pub r2: f32,            // radius squared of the segment (max distance from centroid)
+    pub entropy: f32,       // heterogeneity score in [0, 1]
+}
+
+impl SegmentSummary {
+    pub fn new(
+        segment_id: u64,
+        vector_count: usize,
+        dimension: usize,
+        centroid: Vec<f32>,
+        r2: f32,
+        entropy: f32,
+    ) -> Self {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        Self {
+            segment_id,
+            vector_count,
+            dimension,
+            created_at: now,
+            query_visit_count: Arc::new(AtomicU64::new(0)),
+            centroid,
+            r2,
+            entropy,
+        }
+    }
+
+    pub fn age_secs(&self) -> u64 {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        now.saturating_sub(self.created_at)
+    }
+
+    pub fn size_bytes(&self) -> usize {
+        self.vector_count * self.dimension * std::mem::size_of::<f32>()
+    }
+
+    pub fn size_mb(&self) -> f32 {
+        self.size_bytes() as f32 / (1024.0 * 1024.0)
+    }
+
+    pub fn visit_count(&self) -> u64 {
+        self.query_visit_count.load(Ordering::Relaxed)
+    }
+
+    pub fn record_visit(&self) {
+        self.query_visit_count.fetch_add(1, Ordering::Relaxed);
+    }
+}
 
 /// A `SegmentBitSet` is a compact `u64`-based bitset for tracking seen positions.
 /// Avoids `HashSet<usize>` overhead for deduplication in the query hot path.
@@ -53,6 +220,11 @@ impl SegmentBitSet {
                 false
             }
         }
+    }
+
+    pub fn clear(&mut self) {
+        self.inline = 0;
+        self.vec.clear();
     }
 }
 
@@ -131,12 +303,17 @@ impl SegmentBuilder {
 
         let index = RpfIndex::builder(self.dim, leaf_size, num_trees, seed)
             .build(&vectors, &external_ids)?;
-        Ok(Segment::from_owned(self.dim, vectors, external_ids, index))
+        Ok(Segment::from_owned(
+            self.dim,
+            vectors,
+            external_ids,
+            Box::new(index),
+        ))
     }
 }
 
 pub(crate) struct SegmentQueryContext {
-    pub(crate) candidates: Vec<RpfCandidate>,
+    pub(crate) candidates: Vec<IndexCandidate>,
     pub(crate) queue: VecDeque<usize>,
     pub(crate) best_map: HashMap<u32, f32>,
     pub(crate) seen: SegmentBitSet,
@@ -156,21 +333,17 @@ impl SegmentQueryContext {
 pub struct Segment {
     pub dim: usize,
     pub count: usize,
-    pub index: RpfIndex,
+    pub index: Box<dyn SegmentIndex>,
     vector_bytes_per_row: usize,
     storage: SegmentStorage,
 }
 
 impl Segment {
-    pub fn builder(dim: usize, max_capacity_mb: usize) -> SegmentBuilder {
-        SegmentBuilder::new(dim, max_capacity_mb)
-    }
-
     pub fn from_owned(
         dim: usize,
         vectors: Vec<f32>,
         external_ids: Vec<u32>,
-        index: RpfIndex,
+        index: Box<dyn SegmentIndex>,
     ) -> Self {
         let count = external_ids.len();
         let vector_bytes_per_row = dim * std::mem::size_of::<f32>();
@@ -185,6 +358,96 @@ impl Segment {
                 external_ids,
             },
         }
+    }
+
+    pub fn estimate_entropy(&self) -> Result<f32, DendraError> {
+        if self.count < 2 {
+            return Ok(0.0);
+        }
+
+        // Fast heterogeneity proxy for embedding segments:
+        // sample vectors uniformly and measure average pairwise cosine distance.
+        // 0 => very coherent cluster, 1 => highly mixed content.
+        let sample_cap = 64usize;
+        let sample_size = self.count.min(sample_cap);
+        if sample_size < 2 {
+            return Ok(0.0);
+        }
+
+        let mut samples: Vec<Vec<f32>> = Vec::with_capacity(sample_size);
+        for k in 0..sample_size {
+            let i = (k * self.count) / sample_size;
+            let v = self.vector_at(i)?;
+            samples.push(v.to_vec());
+        }
+
+        let norms: Vec<f32> = samples.iter().map(|v| math::l2_norm(v)).collect();
+
+        let mut sum = 0.0f32;
+        let mut n = 0usize;
+        for i in 0..samples.len() {
+            if norms[i] <= 0.0 {
+                continue;
+            }
+            for j in (i + 1)..samples.len() {
+                if norms[j] <= 0.0 {
+                    continue;
+                }
+                let cosine =
+                    (math::dot(&samples[i], &samples[j]) / (norms[i] * norms[j])).clamp(-1.0, 1.0);
+                let dist01 = 0.5 * (1.0 - cosine);
+                sum += dist01;
+                n += 1;
+            }
+        }
+
+        if n == 0 {
+            return Ok(0.5);
+        }
+
+        Ok((sum / n as f32).clamp(0.0, 1.0))
+    }
+
+    /// r2 is the largest squared distance from the centroid to any vector in the segment.
+    pub fn describe(&self, centroid: &mut [f32], r2: &mut f32) -> Result<(), DendraError> {
+        if centroid.len() != self.dim {
+            return Err(DendraError::InvalidVectorDimension {
+                expected: self.dim,
+                received: centroid.len(),
+            });
+        }
+
+        for c in centroid.iter_mut() {
+            *c = 0.0;
+        }
+        *r2 = 0.0;
+
+        if self.count == 0 {
+            return Ok(());
+        }
+
+        // Pass 1: centroid accumulation.
+        for i in 0..self.count {
+            let vec = self.vector_at(i)?;
+            for (j, &val) in vec.iter().enumerate() {
+                centroid[j] += val;
+            }
+        }
+
+        // Normalize centroid.
+        let count = self.count as f32;
+        for val in centroid.iter_mut() {
+            *val /= count;
+        }
+
+        // Pass 2: compute max squared distance to centroid.
+        for i in 0..self.count {
+            let vec = self.vector_at(i)?;
+            let dist2 = math::l2_distance_sq(vec, centroid);
+            *r2 = (*r2).max(dist2);
+        }
+
+        Ok(())
     }
 
     #[inline]
@@ -251,37 +514,23 @@ impl Segment {
         metric: MetricFn,
         context: &mut SegmentQueryContext,
     ) -> Result<(), DendraError> {
-        self.index.generate_candidates(
+        self.index.search(
             &query.vector,
             max_candidates,
             &mut context.candidates,
             &mut context.queue,
         );
 
-        context.seen = SegmentBitSet::with_capacity(self.count);
+        context.seen.clear();
         let best_map = &mut context.best_map;
         let query_vec = &query.vector;
         let threshold = query.threshold;
 
         for candidate in context.candidates.iter() {
-            let candidate_tree =
-                self.index
-                    .tree(candidate.tree_index)
-                    .ok_or(DendraError::InvalidTreeIndex {
-                        index: candidate.tree_index,
-                        max: self.index.len(),
-                    })?;
+            let lookups = self.index.candidate_lookups(candidate)?;
 
-            for tree_look_up_index in candidate.start..candidate.end {
-                let id_idx = match candidate_tree.look_up.get(tree_look_up_index) {
-                    Some(&idx) => idx as usize,
-                    None => {
-                        return Err(DendraError::IndexOutOfBounds {
-                            index: tree_look_up_index,
-                            length: candidate_tree.look_up.len(),
-                        });
-                    }
-                };
+            for &lookup_idx in lookups {
+                let id_idx = lookup_idx as usize;
 
                 if !context.seen.insert(id_idx) {
                     continue;
@@ -312,7 +561,7 @@ impl Segment {
 
     pub(crate) fn flush(self, path: &Path) -> Result<Segment, DendraError> {
         let start = std::time::Instant::now();
-        eprintln!(
+        debug!(
             "[Segment::flush] Starting, {} vectors, dim={}, path={:?}",
             self.count, self.dim, path
         );
@@ -348,10 +597,10 @@ impl Segment {
                 (external_ids.len() * std::mem::size_of::<u32>()) as u64,
                 0,
             );
-            write_segment_header(&mut w, &header)?;
+            header.write_to(&mut w)?;
             w.flush()?
         }
-        eprintln!(
+        debug!(
             "  [meta] {:.3}ms",
             meta_start.elapsed().as_secs_f64() * 1000.0
         );
@@ -374,7 +623,7 @@ impl Segment {
             w.flush()?;
         }
         let t2 = start.elapsed();
-        eprintln!(
+        debug!(
             "  [vectors] {:.3}s ({} chunks)",
             vec_start.elapsed().as_secs_f64(),
             total_chunks
@@ -388,16 +637,16 @@ impl Segment {
             w.flush()?;
         }
         let _t3 = start.elapsed();
-        eprintln!(
+        debug!(
             "  [ids] {:.3}ms",
             ids_start.elapsed().as_secs_f64() * 1000.0
         );
 
         let index_start = std::time::Instant::now();
         index.save(&index_path)?;
-        eprintln!("  [index] {:.3}s", index_start.elapsed().as_secs_f64());
+        debug!("  [index] {:.3}s", index_start.elapsed().as_secs_f64());
 
-        eprintln!(
+        debug!(
             "[Segment::flush] TOTAL: {:.3}s | meta={:.1}ms, vec={:.1}ms, ids={:.1}ms, idx={:.1}ms",
             start.elapsed().as_secs_f64(),
             t2.as_secs_f64() * 1000.0,
@@ -419,7 +668,7 @@ impl Segment {
 
         let header = {
             let mut r = std::io::BufReader::new(File::open(&meta_path)?);
-            read_segment_header(&mut r)?
+            SegmentHeader::read_from(&mut r)?
         };
 
         if header.magic != SEGMENT_MAGIC {
@@ -480,7 +729,7 @@ impl Segment {
         Ok(Self {
             dim: header.dim as usize,
             count: header.count as usize,
-            index,
+            index: Box::new(index),
             vector_bytes_per_row,
             storage: SegmentStorage::Mapped {
                 _vectors_file: vectors_file,
