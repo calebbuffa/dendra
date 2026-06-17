@@ -1,11 +1,11 @@
+use crate::core::memory::size_of_vec;
 use crate::distance::MetricFn;
-use crate::err::FvdbError;
+use crate::err::DendraError;
 use crate::io::{
-    read_segment_header, write_segment_header, SegmentHeader, SEGMENT_FORMAT_VERSION, SEGMENT_MAGIC,
+    SEGMENT_FORMAT_VERSION, SEGMENT_MAGIC, SegmentHeader, read_segment_header, write_segment_header,
 };
-use crate::memory::size_of_vec;
 use crate::query::Query;
-use crate::{RandomProjectionForest, RpfCandidate};
+use crate::{RpfCandidate, RpfIndex};
 use memmap2::Mmap;
 use std::collections::{HashMap, VecDeque};
 use std::fs::{self, File};
@@ -88,9 +88,9 @@ impl SegmentBuilder {
         }
     }
 
-    pub fn try_insert(&mut self, vector: &[f32], external_id: u32) -> Result<bool, FvdbError> {
+    pub fn try_insert(&mut self, vector: &[f32], external_id: u32) -> Result<bool, DendraError> {
         if vector.len() != self.dim {
-            return Err(FvdbError::InvalidVectorDimension {
+            return Err(DendraError::InvalidVectorDimension {
                 expected: self.dim,
                 received: vector.len(),
             });
@@ -124,12 +124,12 @@ impl SegmentBuilder {
         leaf_size: usize,
         num_trees: usize,
         seed: u64,
-    ) -> Result<Segment, FvdbError> {
+    ) -> Result<Segment, DendraError> {
         let vectors = std::mem::take(&mut self.vectors);
         let external_ids = std::mem::take(&mut self.external_ids);
         self.current_capacity = 0;
 
-        let index = RandomProjectionForest::builder(self.dim, leaf_size, num_trees, seed)
+        let index = RpfIndex::builder(self.dim, leaf_size, num_trees, seed)
             .build(&vectors, &external_ids)?;
         Ok(Segment::from_owned(self.dim, vectors, external_ids, index))
     }
@@ -153,10 +153,10 @@ impl SegmentQueryContext {
     }
 }
 
-pub(crate) struct Segment {
+pub struct Segment {
     pub dim: usize,
     pub count: usize,
-    pub index: RandomProjectionForest,
+    pub index: RpfIndex,
     vector_bytes_per_row: usize,
     storage: SegmentStorage,
 }
@@ -170,7 +170,7 @@ impl Segment {
         dim: usize,
         vectors: Vec<f32>,
         external_ids: Vec<u32>,
-        index: RandomProjectionForest,
+        index: RpfIndex,
     ) -> Self {
         let count = external_ids.len();
         let vector_bytes_per_row = dim * std::mem::size_of::<f32>();
@@ -188,16 +188,16 @@ impl Segment {
     }
 
     #[inline]
-    pub fn vector_at(&self, row: usize) -> Result<&[f32], FvdbError> {
+    pub fn vector_at(&self, row: usize) -> Result<&[f32], DendraError> {
         let raw_row_bytes = self.dim * std::mem::size_of::<f32>();
         if self.vector_bytes_per_row != raw_row_bytes {
-            return Err(FvdbError::UnsupportedOperation(
+            return Err(DendraError::UnsupportedOperation(
                 "vector_at is unavailable for quantized segment storage".to_string(),
             ));
         }
 
         if row >= self.count {
-            return Err(FvdbError::IndexOutOfBounds {
+            return Err(DendraError::IndexOutOfBounds {
                 index: row,
                 length: self.count,
             });
@@ -214,7 +214,7 @@ impl Segment {
                 let bytes = &vectors_mmap[start_bytes..end_bytes];
 
                 if (bytes.as_ptr() as usize) % std::mem::align_of::<f32>() != 0 {
-                    return Err(FvdbError::MmapFailed("unaligned f32 payload".to_string()));
+                    return Err(DendraError::MmapFailed("unaligned f32 payload".to_string()));
                 }
 
                 let ptr = bytes.as_ptr() as *const f32;
@@ -224,9 +224,9 @@ impl Segment {
     }
 
     #[inline]
-    pub fn id_at(&self, row: usize) -> Result<u32, FvdbError> {
+    pub fn id_at(&self, row: usize) -> Result<u32, DendraError> {
         if row >= self.count {
-            return Err(FvdbError::IndexOutOfBounds {
+            return Err(DendraError::IndexOutOfBounds {
                 index: row,
                 length: self.count,
             });
@@ -244,13 +244,13 @@ impl Segment {
         }
     }
 
-    pub fn query(
+    pub(crate) fn query(
         &self,
         query: &Query,
         max_candidates: usize,
         metric: MetricFn,
         context: &mut SegmentQueryContext,
-    ) -> Result<(), FvdbError> {
+    ) -> Result<(), DendraError> {
         self.index.generate_candidates(
             &query.vector,
             max_candidates,
@@ -267,7 +267,7 @@ impl Segment {
             let candidate_tree =
                 self.index
                     .tree(candidate.tree_index)
-                    .ok_or(FvdbError::InvalidTreeIndex {
+                    .ok_or(DendraError::InvalidTreeIndex {
                         index: candidate.tree_index,
                         max: self.index.len(),
                     })?;
@@ -276,7 +276,7 @@ impl Segment {
                 let id_idx = match candidate_tree.look_up.get(tree_look_up_index) {
                     Some(&idx) => idx as usize,
                     None => {
-                        return Err(FvdbError::IndexOutOfBounds {
+                        return Err(DendraError::IndexOutOfBounds {
                             index: tree_look_up_index,
                             length: candidate_tree.look_up.len(),
                         });
@@ -310,10 +310,7 @@ impl Segment {
         Ok(())
     }
 
-    pub(crate) fn flush(
-        self,
-        path: &Path,
-    ) -> Result<Segment, FvdbError> {
+    pub(crate) fn flush(self, path: &Path) -> Result<Segment, DendraError> {
         let start = std::time::Instant::now();
         eprintln!(
             "[Segment::flush] Starting, {} vectors, dim={}, path={:?}",
@@ -331,7 +328,7 @@ impl Segment {
                 external_ids,
             } => (vectors, external_ids, self.index),
             SegmentStorage::Mapped { .. } => {
-                return Err(FvdbError::UnsupportedOperation(
+                return Err(DendraError::UnsupportedOperation(
                     "cannot flush a mapped segment".to_string(),
                 ));
             }
@@ -398,7 +395,6 @@ impl Segment {
 
         let index_start = std::time::Instant::now();
         index.save(&index_path)?;
-        let t4 = start.elapsed();
         eprintln!("  [index] {:.3}s", index_start.elapsed().as_secs_f64());
 
         eprintln!(
@@ -409,13 +405,13 @@ impl Segment {
                 - (t2.as_secs_f64() - vec_start.elapsed().as_secs_f64()))
                 * 1000.0,
             ids_start.elapsed().as_secs_f64() * 1000.0,
-            index_start.elapsed().as_secs_f64()
+            index_start.elapsed().as_secs_f64() * 1000.0
         );
 
         Ok(Segment::open(path)?)
     }
 
-    pub fn open(path: &Path) -> Result<Self, FvdbError> {
+    pub fn open(path: &Path) -> Result<Self, DendraError> {
         let meta_path = path.join("metadata.bin");
         let vectors_path = path.join("vectors.bin");
         let ids_path = path.join("ids.bin");
@@ -427,14 +423,14 @@ impl Segment {
         };
 
         if header.magic != SEGMENT_MAGIC {
-            return Err(FvdbError::InvalidHeader {
+            return Err(DendraError::InvalidHeader {
                 expected: String::from_utf8_lossy(&SEGMENT_MAGIC).to_string(),
                 received: String::from_utf8_lossy(&header.magic).to_string(),
             });
         }
 
         if header.format_version != SEGMENT_FORMAT_VERSION {
-            return Err(FvdbError::UnsupportedVersion {
+            return Err(DendraError::UnsupportedVersion {
                 expected: SEGMENT_FORMAT_VERSION.to_string(),
                 received: header.format_version.to_string(),
             });
@@ -447,7 +443,7 @@ impl Segment {
         let ids_len = ids_file.metadata()?.len() as usize;
 
         if vectors_len != header.vectors_bytes as usize {
-            return Err(FvdbError::MmapSizeMismatch {
+            return Err(DendraError::MmapSizeMismatch {
                 expected: header.vectors_bytes as usize,
                 received: vectors_len,
             });
@@ -458,7 +454,7 @@ impl Segment {
             header.dim as usize * std::mem::size_of::<f32>()
         } else {
             if vectors_len % count != 0 {
-                return Err(FvdbError::MmapSizeMismatch {
+                return Err(DendraError::MmapSizeMismatch {
                     expected: count,
                     received: vectors_len,
                 });
@@ -467,19 +463,19 @@ impl Segment {
         };
 
         if ids_len != header.ids_bytes as usize {
-            return Err(FvdbError::MmapSizeMismatch {
+            return Err(DendraError::MmapSizeMismatch {
                 expected: header.ids_bytes as usize,
                 received: ids_len,
             });
         }
 
         let vectors_mmap = unsafe { Mmap::map(&vectors_file) }
-            .map_err(|e| FvdbError::MmapFailed(e.to_string()))?;
+            .map_err(|e| DendraError::MmapFailed(e.to_string()))?;
 
         let ids_mmap =
-            unsafe { Mmap::map(&ids_file) }.map_err(|e| FvdbError::MmapFailed(e.to_string()))?;
+            unsafe { Mmap::map(&ids_file) }.map_err(|e| DendraError::MmapFailed(e.to_string()))?;
 
-        let index = RandomProjectionForest::load(&index_path)?;
+        let index = RpfIndex::load(&index_path)?;
 
         Ok(Self {
             dim: header.dim as usize,

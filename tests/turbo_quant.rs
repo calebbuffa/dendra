@@ -1,5 +1,5 @@
-use fvdb::{Dequantizer, QuantizeError, Quantizer, TurboQuant, TurboQuantConfig, TurboQuantMode};
-use rand::{rngs::StdRng, SeedableRng};
+use dendra::{Dequantizer, QuantizeError, Quantizer, TurboQuant, TurboQuantConfig, TurboQuantMode};
+use rand::{SeedableRng, rngs::StdRng};
 use rand_distr::{Distribution, StandardNormal};
 
 fn random_vectors(n: usize, dim: usize, seed: u64) -> Vec<Vec<f32>> {

@@ -8,7 +8,7 @@ use std::{
 };
 
 use crate::{
-    FvdbError,
+    DendraError,
     io::{read_u32_le, read_u64_le},
 };
 
@@ -18,7 +18,7 @@ const FOREST_VERSION: u32 = 1;
 mod node;
 mod tree;
 
-pub use node::Node;
+pub(crate) use node::Node;
 pub use tree::{Candidate, Tree};
 
 pub struct ForestBuilder {
@@ -38,7 +38,7 @@ impl ForestBuilder {
         }
     }
 
-    pub fn build(&self, vectors: &[f32], ids: &[u32]) -> Result<Forest, FvdbError> {
+    pub fn build(&self, vectors: &[f32], ids: &[u32]) -> Result<Forest, DendraError> {
         let config = ForestConfig {
             seed: self.seed,
             leaf_size: self.leaf_size,
@@ -80,9 +80,13 @@ impl Forest {
         self.config.leaf_size
     }
 
-    pub fn save(&self, path: &Path) -> Result<(), FvdbError> {
+    pub fn save(&self, path: &Path) -> Result<(), DendraError> {
         let start = std::time::Instant::now();
-        eprintln!("[Forest::save] Saving {} trees to {:?}", self.trees.len(), path);
+        eprintln!(
+            "[Forest::save] Saving {} trees to {:?}",
+            self.trees.len(),
+            path
+        );
         let mut w = BufWriter::new(File::create(path)?);
         w.write_all(FOREST_MAGIC)?;
         w.write_all(&FOREST_VERSION.to_le_bytes())?;
@@ -95,27 +99,34 @@ impl Forest {
             let tree_start = std::time::Instant::now();
             tree.write(&mut w)?;
             if (i + 1) % 2 == 0 {
-                eprintln!("  tree {}: {:.1}ms", i, tree_start.elapsed().as_secs_f64() * 1000.0);
+                eprintln!(
+                    "  tree {}: {:.1}ms",
+                    i,
+                    tree_start.elapsed().as_secs_f64() * 1000.0
+                );
             }
         }
         w.flush()?;
-        eprintln!("[Forest::save] Complete in {:.3}s", start.elapsed().as_secs_f64());
+        eprintln!(
+            "[Forest::save] Complete in {:.3}s",
+            start.elapsed().as_secs_f64()
+        );
         Ok(())
     }
 
-    pub fn load(path: &Path) -> Result<Self, FvdbError> {
+    pub fn load(path: &Path) -> Result<Self, DendraError> {
         let mut r = BufReader::new(File::open(path)?);
         let mut magic = [0u8; 4];
         r.read_exact(&mut magic)?;
         if &magic != FOREST_MAGIC {
-            return Err(FvdbError::InvalidHeader {
+            return Err(DendraError::InvalidHeader {
                 expected: String::from_utf8_lossy(FOREST_MAGIC).to_string(),
                 received: String::from_utf8_lossy(&magic).to_string(),
             });
         }
         let version = read_u32_le(&mut r)?;
         if version != FOREST_VERSION {
-            return Err(FvdbError::InvalidHeader {
+            return Err(DendraError::InvalidHeader {
                 expected: FOREST_VERSION.to_string(),
                 received: version.to_string(),
             });
@@ -150,7 +161,7 @@ impl Forest {
         ForestBuilder::new(dim, leaf_size, num_trees, seed)
     }
 
-    pub fn build(&mut self, vectors: &[f32], ids: &[u32], dim: usize) -> Result<(), FvdbError> {
+    pub fn build(&mut self, vectors: &[f32], ids: &[u32], dim: usize) -> Result<(), DendraError> {
         self.trees.clear();
         let leaf_size = self.config.leaf_size;
         let num_trees = self.config.num_trees;

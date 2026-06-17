@@ -1,14 +1,14 @@
 [package]
-name = "fvdb-py"
+name = "dendra-py"
 version = "0.1.0"
 edition = "2024"
 
 [lib]
-name = "fvdb"
+name = "dendra"
 crate-type = ["cdylib"]
 
 [dependencies]
-fvdb = { path = ".." }
+dendra = { path = ".." }
 pyo3 = { version = "0.21", features = ["extension-module"] }
 numpy = "0.21"
 ndarray = "0.15"

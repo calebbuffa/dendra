@@ -26,7 +26,7 @@ pub enum QuantizeError {
     #[error("IO error: {0}")]
     IoError(String),
     #[error("Serialization error: {0}")]
-    SerializationError(String),
+    Serialization(String),
 }
 
 impl From<std::io::Error> for QuantizeError {
@@ -37,13 +37,13 @@ impl From<std::io::Error> for QuantizeError {
 
 impl From<bincode::error::EncodeError> for QuantizeError {
     fn from(err: bincode::error::EncodeError) -> Self {
-        QuantizeError::SerializationError(err.to_string())
+        QuantizeError::Serialization(err.to_string())
     }
 }
 
 impl From<bincode::error::DecodeError> for QuantizeError {
     fn from(err: bincode::error::DecodeError) -> Self {
-        QuantizeError::SerializationError(err.to_string())
+        QuantizeError::Serialization(err.to_string())
     }
 }
 

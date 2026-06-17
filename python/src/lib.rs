@@ -5,7 +5,7 @@ use pyo3::types::PyBytes;
 use ndarray::s;
 use numpy::{PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2, ToPyArray};
 
-use fvdb::{cosine_distance, l2_distance, Query, VectorDB, VectorDBConfig};
+use dendra::{cosine_distance, l2_distance, Query, VectorDB, VectorDBConfig};
 
 /// Python wrapper for VectorDB
 #[pyclass(name = "VectorDB")]
@@ -235,13 +235,13 @@ impl PyVectorDB {
 
 /// Python module initialization
 #[pymodule]
-fn fvdb(py: Python, m: &PyModule) -> PyResult<()> {
+fn dendra(py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<PyVectorDB>()?;
 
     // Add module docstring
     m.add(
         "__doc__",
-        "Fast Vector Database (FVDB) - High-performance vector search with Random Projection Forests",
+        "Fast Vector Database (dendra) - High-performance vector search with Random Projection Forests",
     )?;
 
     Ok(())

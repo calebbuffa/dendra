@@ -5,10 +5,10 @@ use std::{
 };
 
 use crate::{
-    FvdbError,
+    DendraError,
+    index::rpf::Node,
     io::read_u32_le,
     math::{dot, random_unit_vector},
-    rpf::Node,
 };
 
 const MAX_SPLIT_TRIES: usize = 5;
@@ -30,7 +30,7 @@ impl TreeBuilder {
         vectors: &[f32],
         ids: &[u32],
         rng: &mut impl Rng,
-    ) -> Result<Tree, FvdbError> {
+    ) -> Result<Tree, DendraError> {
         let mut tree = Tree::new(self.dim, self.leaf_size);
         tree.build(vectors, ids, rng)?;
         Ok(tree)
@@ -45,7 +45,7 @@ fn compute_median_split(
     start: usize,
     end: usize,
     dim: usize,
-) -> Result<(f32, usize), FvdbError> {
+) -> Result<(f32, usize), DendraError> {
     // compute dot products for ids[start..end) and collect (dp, id)
     dp_pairs.clear();
     for i in start..end {
@@ -59,7 +59,7 @@ fn compute_median_split(
 
     let len = dp_pairs.len();
     if len == 0 {
-        return Err(FvdbError::EmptyNode);
+        return Err(DendraError::EmptyNode);
     }
 
     let mid = dp_pairs.len() / 2;
@@ -73,7 +73,7 @@ fn compute_median_split(
 
     // fallback if degenerate (all or none on one side)
     if left_count == 0 || left_count == dp_pairs.len() {
-        return Err(FvdbError::DegenerateSplit);
+        return Err(DendraError::DegenerateSplit);
     }
 
     // Write partitioned ids back into ids[start..end):
@@ -111,7 +111,7 @@ impl Tree {
         }
     }
 
-    pub fn write<W: Write>(&self, w: &mut W) -> Result<(), FvdbError> {
+    pub fn write<W: Write>(&self, w: &mut W) -> Result<(), DendraError> {
         let start = std::time::Instant::now();
         w.write_all(&(self.nodes.len() as u32).to_le_bytes())?;
 
@@ -119,19 +119,30 @@ impl Tree {
         for node in self.nodes.iter() {
             node.write(w)?;
         }
-        eprintln!("    write {} nodes: {:.1}ms", self.nodes.len(), nodes_start.elapsed().as_secs_f64() * 1000.0);
+        eprintln!(
+            "    write {} nodes: {:.1}ms",
+            self.nodes.len(),
+            nodes_start.elapsed().as_secs_f64() * 1000.0
+        );
 
         let lookup_start = std::time::Instant::now();
         w.write_all(&(self.look_up.len() as u32).to_le_bytes())?;
         for &id in self.look_up.iter() {
             w.write_all(&id.to_le_bytes())?;
         }
-        eprintln!("    write {} lookups: {:.1}ms", self.look_up.len(), lookup_start.elapsed().as_secs_f64() * 1000.0);
-        eprintln!("    tree total: {:.1}ms", start.elapsed().as_secs_f64() * 1000.0);
+        eprintln!(
+            "    write {} lookups: {:.1}ms",
+            self.look_up.len(),
+            lookup_start.elapsed().as_secs_f64() * 1000.0
+        );
+        eprintln!(
+            "    tree total: {:.1}ms",
+            start.elapsed().as_secs_f64() * 1000.0
+        );
         Ok(())
     }
 
-    pub fn read<R: Read>(r: &mut R, dim: usize, leaf_size: usize) -> Result<Self, FvdbError> {
+    pub fn read<R: Read>(r: &mut R, dim: usize, leaf_size: usize) -> Result<Self, DendraError> {
         let num_nodes = read_u32_le(r)? as usize;
         let mut nodes = Vec::with_capacity(num_nodes);
         for _ in 0..num_nodes {
@@ -209,7 +220,7 @@ impl Tree {
         vectors: &[f32],
         ids: &[u32],
         rng: &mut impl Rng,
-    ) -> Result<usize, FvdbError> {
+    ) -> Result<usize, DendraError> {
         let n = ids.len() as u32;
         self.look_up = (0u32..n).collect(); // initialize to identity permutation
 
@@ -267,9 +278,9 @@ impl Tree {
                     self.dim,
                 ) {
                     Ok((p, lc)) => break Ok((p, lc)),
-                    Err(FvdbError::DegenerateSplit) => {
+                    Err(DendraError::DegenerateSplit) => {
                         if split_attempt >= MAX_SPLIT_TRIES {
-                            break Err(FvdbError::DegenerateSplit);
+                            break Err(DendraError::DegenerateSplit);
                         }
                         projection = random_unit_vector(self.dim, rng)?;
                         split_attempt += 1;
@@ -300,7 +311,7 @@ impl Tree {
                     queue.push_back((left_child_idx, start, left_end));
                     queue.push_back((right_child_idx, left_end, end));
                 }
-                Err(FvdbError::DegenerateSplit) => {
+                Err(DendraError::DegenerateSplit) => {
                     // Couldn't find a safe split: make this node a leaf
                     self.nodes[node_idx] = Node::leaf(start, end);
                     continue;

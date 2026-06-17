@@ -1,4 +1,4 @@
-use crate::err::FvdbError;
+use crate::err::DendraError;
 use faer::{Mat, Stride};
 use rand::Rng;
 use rand::{SeedableRng, rngs::StdRng};
@@ -200,8 +200,8 @@ pub fn batch_mat_t_mul(rotation: &Mat<f32>, vectors: &[f32], dim: usize) -> Vec<
             vectors.as_ptr(),
             dim,
             n,
-            1isize,        // row_stride: rows contiguous within each column
-            dim as isize,  // col_stride: each vector starts dim elements apart
+            1isize,       // row_stride: rows contiguous within each column
+            dim as isize, // col_stride: each vector starts dim elements apart
         )
     };
     let mat_time = mat_create.elapsed().as_secs_f64() * 1000.0;
@@ -258,13 +258,7 @@ pub fn batch_mat_mul(rotation: &Mat<f32>, vectors: &[f32], dim: usize) -> Vec<f3
     // Zero-copy input: same layout as column-major (dim x n)
     let mat_create = std::time::Instant::now();
     let vec_mat = unsafe {
-        faer::MatRef::<f32>::from_raw_parts(
-            vectors.as_ptr(),
-            dim,
-            n,
-            1isize,
-            dim as isize,
-        )
+        faer::MatRef::<f32>::from_raw_parts(vectors.as_ptr(), dim, n, 1isize, dim as isize)
     };
     let mat_time = mat_create.elapsed().as_secs_f64() * 1000.0;
 
@@ -308,21 +302,21 @@ pub fn batch_mat_mul(rotation: &Mat<f32>, vectors: &[f32], dim: usize) -> Vec<f3
     flat
 }
 
-pub fn cosine_similarity(a: &[f32], b: &[f32]) -> Result<f32, FvdbError> {
+pub fn cosine_similarity(a: &[f32], b: &[f32]) -> Result<f32, DendraError> {
     let dp = dot(a, b);
     let norm_a = l2_norm(a);
     let norm_b = l2_norm(b);
     if norm_a == 0.0 || norm_b == 0.0 {
-        return Err(FvdbError::ZeroNormVector);
+        return Err(DendraError::ZeroNormVector);
     }
     Ok(dp / (norm_a * norm_b))
 }
 
 /// Normalize vector in-place.
-pub fn normalize(a: &mut [f32]) -> Result<(), FvdbError> {
+pub fn normalize(a: &mut [f32]) -> Result<(), DendraError> {
     let norm = l2_norm(a);
     if norm == 0.0 {
-        return Err(FvdbError::ZeroNormVector);
+        return Err(DendraError::ZeroNormVector);
     }
     let inv_norm = 1.0 / norm;
     for x in a.iter_mut() {
@@ -375,7 +369,7 @@ pub fn random_standard_normal_vector(dim: usize, rng: &mut impl Rng) -> Vec<f32>
         .collect()
 }
 
-pub fn random_unit_vector(dim: usize, rng: &mut impl Rng) -> Result<Vec<f32>, FvdbError> {
+pub fn random_unit_vector(dim: usize, rng: &mut impl Rng) -> Result<Vec<f32>, DendraError> {
     let mut v = random_standard_normal_vector(dim, rng);
     normalize(&mut v)?;
     Ok(v)

@@ -1,15 +1,21 @@
-use fvdb::{cosine_distance, math, Query, VectorDB, VectorDBConfig};
-use rand::{rngs::StdRng, SeedableRng};
+use dendra::{CompactionPolicyType, Query, VectorDB, VectorDBConfig, cosine_distance, math};
+use env_logger;
+use rand::{SeedableRng, rngs::StdRng};
 use std::path::PathBuf;
 use std::time::Instant;
 
 fn main() {
+    env_logger::init();
     let dir = PathBuf::from("my_vector_store");
     if dir.exists() {
         std::fs::remove_dir_all(&dir).unwrap();
     }
     let dimension = 128;
-    let config = VectorDBConfig::new(32, 4, 128, 42, 100, 2);
+    let config = VectorDBConfig::new(32, 4, 128, 42, 100, 2).with_compaction_policy(
+        CompactionPolicyType::SimilarityAware {
+            overlap_threshold: 0.5,
+        },
+    );
 
     let mut store = VectorDB::new(dir, config);
 

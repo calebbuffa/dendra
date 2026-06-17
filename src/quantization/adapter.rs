@@ -70,7 +70,7 @@ impl Quantizer for TurboQuantAdapter {
             turbo.quantize(vector, out)?;
             Ok(())
         } else {
-            Err(QuantizeError::SerializationError(
+            Err(QuantizeError::Serialization(
                 "TurboQuant not available".to_string(),
             ))
         }
@@ -81,7 +81,7 @@ impl Quantizer for TurboQuantAdapter {
         if let Some(turbo) = self.turbo.as_ref() {
             turbo.batch_quantize(vectors, output)
         } else {
-            Err(QuantizeError::SerializationError(
+            Err(QuantizeError::Serialization(
                 "TurboQuant not available".to_string(),
             ))
         }
@@ -99,7 +99,7 @@ impl Quantizer for TurboQuantAdapter {
 
     fn serialize(&self, writer: &mut dyn Write) -> Result<(), QuantizeError> {
         let encoded = serde_json::to_vec(self)
-            .map_err(|e| QuantizeError::SerializationError(e.to_string()))?;
+            .map_err(|e| QuantizeError::Serialization(e.to_string()))?;
         writer.write_all(&encoded)?;
         Ok(())
     }
@@ -110,7 +110,7 @@ impl Dequantizer for TurboQuantAdapter {
         if let Some(turbo) = self.turbo.as_ref() {
             turbo.dequantize(quantized, out)
         } else {
-            Err(QuantizeError::SerializationError(
+            Err(QuantizeError::Serialization(
                 "TurboQuant not available".to_string(),
             ))
         }

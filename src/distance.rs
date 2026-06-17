@@ -1,8 +1,8 @@
-use crate::{err::FvdbError, math::cosine_similarity};
+use crate::{err::DendraError, math::cosine_similarity};
 
 /// A distance function that takes two vectors and returns a similarity score.
 /// "lower is better"
-pub type MetricFn = fn(&[f32], &[f32]) -> Result<f32, FvdbError>;
+pub type MetricFn = fn(&[f32], &[f32]) -> Result<f32, DendraError>;
 
 pub fn l2_distance(a: &[f32], b: &[f32]) -> f32 {
     let n = a.len().min(b.len());
@@ -16,7 +16,7 @@ pub fn l2_distance(a: &[f32], b: &[f32]) -> f32 {
         .sqrt()
 }
 
-pub fn cosine_distance(a: &[f32], b: &[f32]) -> Result<f32, FvdbError> {
+pub fn cosine_distance(a: &[f32], b: &[f32]) -> Result<f32, DendraError> {
     let sim = cosine_similarity(a, b)?;
     Ok(1.0 - sim)
 }

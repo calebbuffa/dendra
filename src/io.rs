@@ -1,4 +1,4 @@
-use crate::FvdbError;
+use crate::DendraError;
 use std::io::{Read, Write};
 
 pub const SEGMENT_MAGIC: [u8; 4] = *b"SEGM";
@@ -40,7 +40,7 @@ impl SegmentHeader {
     }
 }
 
-pub fn write_segment_header<W: Write>(w: &mut W, h: &SegmentHeader) -> Result<(), FvdbError> {
+pub fn write_segment_header<W: Write>(w: &mut W, h: &SegmentHeader) -> Result<(), DendraError> {
     w.write_all(&h.magic)?;
     w.write_all(&[h.format_version])?;
     w.write_all(&[h.flags])?;
@@ -53,7 +53,7 @@ pub fn write_segment_header<W: Write>(w: &mut W, h: &SegmentHeader) -> Result<()
     Ok(())
 }
 
-pub fn read_segment_header<R: Read>(r: &mut R) -> Result<SegmentHeader, FvdbError> {
+pub fn read_segment_header<R: Read>(r: &mut R) -> Result<SegmentHeader, DendraError> {
     let mut magic = [0u8; 4];
     r.read_exact(&mut magic)?;
 
@@ -98,25 +98,25 @@ pub fn read_segment_header<R: Read>(r: &mut R) -> Result<SegmentHeader, FvdbErro
     })
 }
 
-pub(crate) fn read_u8_le<R: Read>(r: &mut R) -> Result<u8, FvdbError> {
+pub(crate) fn read_u8_le<R: Read>(r: &mut R) -> Result<u8, DendraError> {
     let mut buf = [0u8; 1];
     r.read_exact(&mut buf)?;
     Ok(buf[0])
 }
 
-pub(crate) fn read_u32_le<R: Read>(r: &mut R) -> Result<u32, FvdbError> {
+pub(crate) fn read_u32_le<R: Read>(r: &mut R) -> Result<u32, DendraError> {
     let mut buf = [0u8; 4];
     r.read_exact(&mut buf)?;
     Ok(u32::from_le_bytes(buf))
 }
 
-pub(crate) fn read_u64_le<R: Read>(r: &mut R) -> Result<u64, FvdbError> {
+pub(crate) fn read_u64_le<R: Read>(r: &mut R) -> Result<u64, DendraError> {
     let mut buf = [0u8; 8];
     r.read_exact(&mut buf)?;
     Ok(u64::from_le_bytes(buf))
 }
 
-pub(crate) fn read_f32_le<R: Read>(r: &mut R) -> Result<f32, FvdbError> {
+pub(crate) fn read_f32_le<R: Read>(r: &mut R) -> Result<f32, DendraError> {
     let mut buf = [0u8; 4];
     r.read_exact(&mut buf)?;
     Ok(f32::from_le_bytes(buf))

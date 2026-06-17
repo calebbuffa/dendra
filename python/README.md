@@ -1,11 +1,11 @@
-# FVDB Python Bindings
+# dendra Python Bindings
 
 High-performance vector search library for Python with Random Projection Forests.
 
 ## Installation
 
 ```bash
-pip install fvdb
+pip install dendra
 ```
 
 Or build from source:
@@ -20,7 +20,7 @@ maturin develop
 
 ```python
 import numpy as np
-from fvdb import VectorDB
+from dendra import VectorDB
 
 # Create a database
 db = VectorDB(

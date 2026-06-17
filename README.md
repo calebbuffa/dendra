@@ -1,8 +1,6 @@
-# fvdb
+# dendra
 
-*F*ast *V*ector *D*ata*b*ase.
-
-`fvdb` is a lightweight Rust vector database built around immutable, memory-mapped segments and random projection trees.
+`dendra` is a simple vector database built around immutable, memory-mapped segments and random projection trees.
 
 ## Design
 
@@ -92,8 +90,6 @@ Implemented:
 
 Planned next:
 
-- mmap-backed reads for segment payloads
-- mmap-backed forest index loading
 - store lifecycle and recovery
 - quantized vector codecs
 

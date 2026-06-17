@@ -1,9 +1,9 @@
-"""Simple example of using FVDB with NumPy."""
+"""Simple example of using dendra with NumPy."""
 
 import tempfile
 
 import numpy as np
-from fvdb import VectorDB
+from dendra import VectorDB
 
 
 def main():

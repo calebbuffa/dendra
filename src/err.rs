@@ -1,7 +1,8 @@
+use crate::core::TaskSystemError;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
-pub enum FvdbError {
+pub enum DendraError {
     #[error("Zero-norm vector")]
     ZeroNormVector,
     #[error("Degenerate split for a Random Projection Tree Node")]
@@ -27,5 +28,7 @@ pub enum FvdbError {
     #[error("mmap size mismatch: expected {expected}, received {received}")]
     MmapSizeMismatch { expected: usize, received: usize },
     #[error("Serialization error: {0}")]
-    SerializationError(String),
+    Serialization(String),
+    #[error("Task system error: {0}")]
+    TaskSystem(#[from] TaskSystemError),
 }

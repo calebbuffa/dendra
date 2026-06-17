@@ -1,7 +1,7 @@
 use std::io::{Read, Write};
 
 use crate::{
-    FvdbError,
+    DendraError,
     io::{read_f32_le, read_u8_le, read_u32_le},
 };
 
@@ -45,7 +45,7 @@ impl Node {
         node
     }
 
-    pub fn write<W: Write>(&self, w: &mut W) -> Result<(), FvdbError> {
+    pub fn write<W: Write>(&self, w: &mut W) -> Result<(), DendraError> {
         let _start = std::time::Instant::now();
         w.write_all(&self.left.to_le_bytes())?;
         w.write_all(&self.right.to_le_bytes())?;
@@ -59,12 +59,16 @@ impl Node {
             w.write_all(&p.to_le_bytes())?;
         }
         if self.projection.len() > 128 {
-            eprintln!("      node proj write: {} bytes in {:.2}µs", self.projection.len() * 4, proj_start.elapsed().as_secs_f64() * 1_000_000.0);
+            eprintln!(
+                "      node proj write: {} bytes in {:.2}µs",
+                self.projection.len() * 4,
+                proj_start.elapsed().as_secs_f64() * 1_000_000.0
+            );
         }
         Ok(())
     }
 
-    pub fn read<R: Read>(r: &mut R) -> Result<Self, FvdbError> {
+    pub fn read<R: Read>(r: &mut R) -> Result<Self, DendraError> {
         let left = read_u32_le(r)?;
         let right = read_u32_le(r)?;
         let is_leaf = read_u8_le(r)? != 0;
