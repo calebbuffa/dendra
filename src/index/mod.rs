@@ -6,7 +6,7 @@ use std::{cell::RefCell, collections::VecDeque, path::Path};
 
 use crate::DendraError;
 
-pub use ivf::{Candidate as IvfCandidate, IvfIndex};
+pub use ivf::{Candidate as IvfCandidate, Ivf as IvfIndex};
 pub use rpf::{
     Candidate as RpfCandidate, Forest as RpfIndex, TreeBuildPolicy as RpfTreeBuildPolicy,
 };
@@ -28,7 +28,7 @@ pub enum IndexCandidate {
 /// This keeps `Segment` decoupled from a concrete backend implementation
 /// while preserving the current RPF behavior.
 pub trait SegmentIndex: Send + Sync {
-    fn search(
+    fn generate_candidates(
         &self,
         vector: &[f32],
         max_candidates: usize,
@@ -44,20 +44,25 @@ pub trait SegmentIndex: Send + Sync {
     fn save(&self, path: &Path) -> Result<(), DendraError>;
 
     fn len(&self) -> usize;
+
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 impl SegmentIndex for RpfIndex {
-    fn search(
+    fn generate_candidates(
         &self,
         vector: &[f32],
         max_candidates: usize,
         candidates: &mut Vec<IndexCandidate>,
         queue: &mut VecDeque<usize>,
     ) {
+        candidates.clear();
         RPF_CANDIDATE_SCRATCH.with(|scratch| {
             let mut raw = scratch.borrow_mut();
             raw.clear();
-            self.generate_candidates(vector, max_candidates, &mut raw, queue);
+            self.search(vector, max_candidates, &mut raw, queue);
             candidates.reserve(raw.len());
             candidates.extend(raw.drain(..).map(IndexCandidate::Rpf));
         });
@@ -103,7 +108,7 @@ impl SegmentIndex for RpfIndex {
 }
 
 impl SegmentIndex for IvfIndex {
-    fn search(
+    fn generate_candidates(
         &self,
         vector: &[f32],
         max_candidates: usize,
@@ -114,7 +119,7 @@ impl SegmentIndex for IvfIndex {
         IVF_CANDIDATE_SCRATCH.with(|scratch| {
             let mut raw = scratch.borrow_mut();
             raw.clear();
-            self.generate_candidates(vector, max_candidates, &mut raw, queue);
+            self.search(vector, max_candidates, &mut raw, queue);
             candidates.reserve(raw.len());
             candidates.extend(raw.drain(..).map(IndexCandidate::Ivf));
         });

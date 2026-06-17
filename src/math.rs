@@ -100,9 +100,8 @@ pub fn dot_packed_signs(projected: &[f32], signs: &[u8], len: usize) -> f32 {
     let chunks = n / 8;
     let remainder = n % 8;
 
-    for chunk in 0..chunks {
+    for (chunk, sign_byte) in signs.iter().enumerate().take(chunks) {
         let base = chunk * 8;
-        let sign_byte = signs[chunk];
         let p0 = projected[base];
         let p1 = projected[base + 1];
         let p2 = projected[base + 2];
@@ -112,14 +111,14 @@ pub fn dot_packed_signs(projected: &[f32], signs: &[u8], len: usize) -> f32 {
         let p6 = projected[base + 6];
         let p7 = projected[base + 7];
 
-        let s0 = 1.0f32 - ((sign_byte >> 0) & 1) as f32 * 2.0;
-        let s1 = 1.0f32 - ((sign_byte >> 1) & 1) as f32 * 2.0;
-        let s2 = 1.0f32 - ((sign_byte >> 2) & 1) as f32 * 2.0;
-        let s3 = 1.0f32 - ((sign_byte >> 3) & 1) as f32 * 2.0;
-        let s4 = 1.0f32 - ((sign_byte >> 4) & 1) as f32 * 2.0;
-        let s5 = 1.0f32 - ((sign_byte >> 5) & 1) as f32 * 2.0;
-        let s6 = 1.0f32 - ((sign_byte >> 6) & 1) as f32 * 2.0;
-        let s7 = 1.0f32 - ((sign_byte >> 7) & 1) as f32 * 2.0;
+        let s0 = 1.0f32 - ((*sign_byte) & 1) as f32 * 2.0;
+        let s1 = 1.0f32 - (((*sign_byte) >> 1) & 1) as f32 * 2.0;
+        let s2 = 1.0f32 - (((*sign_byte) >> 2) & 1) as f32 * 2.0;
+        let s3 = 1.0f32 - (((*sign_byte) >> 3) & 1) as f32 * 2.0;
+        let s4 = 1.0f32 - (((*sign_byte) >> 4) & 1) as f32 * 2.0;
+        let s5 = 1.0f32 - (((*sign_byte) >> 5) & 1) as f32 * 2.0;
+        let s6 = 1.0f32 - (((*sign_byte) >> 6) & 1) as f32 * 2.0;
+        let s7 = 1.0f32 - (((*sign_byte) >> 7) & 1) as f32 * 2.0;
 
         total = p0.mul_add(s0, total);
         total = p1.mul_add(s1, total);

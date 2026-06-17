@@ -190,7 +190,7 @@ impl SegmentBitSet {
     #[inline]
     fn with_capacity(max_id: usize) -> Self {
         let vec = if max_id > 64 {
-            vec![0u64; (max_id + 63) / 64]
+            vec![0u64; max_id.div_ceil(64)]
         } else {
             Vec::new()
         };
@@ -224,7 +224,16 @@ impl SegmentBitSet {
 
     pub fn clear(&mut self) {
         self.inline = 0;
-        self.vec.clear();
+        self.vec.fill(0);
+    }
+
+    pub fn ensure_capacity(&mut self, max_id: usize) {
+        if max_id > 64 {
+            let required_len = max_id.div_ceil(64);
+            if self.vec.len() < required_len {
+                self.vec.resize(required_len, 0);
+            }
+        }
     }
 }
 
@@ -476,7 +485,7 @@ impl Segment {
                 let end_bytes = end * std::mem::size_of::<f32>();
                 let bytes = &vectors_mmap[start_bytes..end_bytes];
 
-                if (bytes.as_ptr() as usize) % std::mem::align_of::<f32>() != 0 {
+                if !(bytes.as_ptr() as usize).is_multiple_of(std::mem::align_of::<f32>()) {
                     return Err(DendraError::MmapFailed("unaligned f32 payload".to_string()));
                 }
 
@@ -514,13 +523,14 @@ impl Segment {
         metric: MetricFn,
         context: &mut SegmentQueryContext,
     ) -> Result<(), DendraError> {
-        self.index.search(
+        self.index.generate_candidates(
             &query.vector,
             max_candidates,
             &mut context.candidates,
             &mut context.queue,
         );
 
+        context.seen.ensure_capacity(self.count);
         context.seen.clear();
         let best_map = &mut context.best_map;
         let query_vec = &query.vector;
@@ -657,7 +667,7 @@ impl Segment {
             index_start.elapsed().as_secs_f64() * 1000.0
         );
 
-        Ok(Segment::open(path)?)
+        Segment::open(path)
     }
 
     pub fn open(path: &Path) -> Result<Self, DendraError> {
@@ -702,7 +712,7 @@ impl Segment {
         let vector_bytes_per_row = if count == 0 {
             header.dim as usize * std::mem::size_of::<f32>()
         } else {
-            if vectors_len % count != 0 {
+            if !vectors_len.is_multiple_of(count) {
                 return Err(DendraError::MmapSizeMismatch {
                     expected: count,
                     received: vectors_len,

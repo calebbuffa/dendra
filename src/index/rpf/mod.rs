@@ -214,7 +214,7 @@ impl Forest {
         );
         Ok(())
     }
-    pub fn generate_candidates(
+    pub fn search(
         &self,
         vector: &[f32],
         max_candidates: usize,

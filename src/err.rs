@@ -31,4 +31,6 @@ pub enum DendraError {
     Serialization(String),
     #[error("Task system error: {0}")]
     TaskSystem(#[from] TaskSystemError),
+    #[error("Deserialization error: {0}")]
+    Deserialization(String),
 }

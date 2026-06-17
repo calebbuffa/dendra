@@ -35,6 +35,12 @@ impl Ord for Scored {
 
 pub struct VectorIndex;
 
+impl Default for VectorIndex {
+    fn default() -> Self {
+        Self
+    }
+}
+
 impl VectorIndex {
     pub fn new() -> Self {
         Self
@@ -71,11 +77,11 @@ impl VectorIndex {
         for (id, distance) in context.best_map.into_iter() {
             if heap.len() < k {
                 heap.push(Scored { id, distance });
-            } else if let Some(top) = heap.peek() {
-                if distance < top.distance {
-                    heap.pop();
-                    heap.push(Scored { id, distance });
-                }
+            } else if let Some(top) = heap.peek()
+                && distance < top.distance
+            {
+                heap.pop();
+                heap.push(Scored { id, distance });
             }
         }
 

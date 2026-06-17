@@ -303,7 +303,7 @@ impl Engine {
             self.next_segment_id,
         );
         let config = bincode::config::standard();
-        let encoded = bincode::encode_to_vec(&metadata, config)
+        let encoded = bincode::encode_to_vec(metadata, config)
             .map_err(|e| DendraError::Serialization(e.to_string()))?;
         w.write_all(&encoded)?;
         Ok(())
@@ -342,7 +342,7 @@ impl Engine {
             u64,
         ) = bincode::decode_from_slice(&metadata_bytes, config)
             .map(|(v, _)| v)
-            .map_err(|e| DendraError::Serialization(e.to_string()))?;
+            .map_err(|e| DendraError::Deserialization(e.to_string()))?;
 
         let cfg = EngineConfig {
             leaf_size: leaf_size as usize,
@@ -469,9 +469,7 @@ impl Engine {
             seed: self.config.seed,
         });
         info!("Scheduling seal for segment {}", segment_id);
-        self.tasks
-            .submit(task)
-            .map_err(|e| DendraError::TaskSystem(e))?;
+        self.tasks.submit(task).map_err(DendraError::TaskSystem)?;
         self.in_flight_tasks += 1;
         Ok(())
     }
@@ -511,9 +509,7 @@ impl Engine {
                 seed: self.config.seed,
             });
 
-            self.tasks
-                .submit(task)
-                .map_err(|e| DendraError::TaskSystem(e))?;
+            self.tasks.submit(task).map_err(DendraError::TaskSystem)?;
             self.in_flight_tasks += 1;
             self.compaction_in_flight = true;
         }
@@ -620,7 +616,7 @@ impl Engine {
             match self
                 .tasks
                 .try_recv_result()
-                .map_err(|e| DendraError::TaskSystem(e))?
+                .map_err(DendraError::TaskSystem)?
             {
                 Some(result) => self.integrate_task_result(result)?,
                 None => return Ok(()),
@@ -629,10 +625,7 @@ impl Engine {
     }
     fn await_all_tasks(&mut self) -> Result<(), DendraError> {
         while self.in_flight_tasks > 0 {
-            let result = self
-                .tasks
-                .recv_result()
-                .map_err(|e| DendraError::TaskSystem(e))?;
+            let result = self.tasks.recv_result().map_err(DendraError::TaskSystem)?;
             self.integrate_task_result(result)?;
             self.maybe_schedule_compaction()?;
         }

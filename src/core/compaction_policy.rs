@@ -63,7 +63,7 @@ impl CompactionPolicy for SizeTieredPolicy {
         let small_count = all_stats.iter().filter(|s| s.size_mb() < 50.0).count();
 
         let pressure = (small_count as f32) / (self.max_segments_per_tier as f32);
-        (pressure - 1.0).max(0.0).min(1.0)
+        (pressure - 1.0).clamp(0.0, 1.0)
     }
 
     fn select_merge_candidates(&self, all_stats: &[SegmentSummary]) -> Option<Vec<u64>> {
@@ -73,7 +73,7 @@ impl CompactionPolicy for SizeTieredPolicy {
 
         // Find the smallest segments
         let mut sorted = all_stats.to_vec();
-        sorted.sort_by(|a, b| a.size_bytes().cmp(&b.size_bytes()));
+        sorted.sort_by_key(|a| a.size_bytes());
 
         let to_merge = (self.max_segments_per_tier).min(sorted.len() / 2).max(2);
         let candidates: Vec<u64> = sorted[..to_merge].iter().map(|s| s.segment_id).collect();
@@ -135,8 +135,7 @@ impl CompactionPolicy for SimilarityAwarePolicy {
             return 0.0;
         }
         (((self.overlap_threshold - avg_overlap) / self.overlap_threshold) * entropy_factor)
-            .max(0.0)
-            .min(1.0)
+            .clamp(0.0, 1.0)
     }
 
     fn select_merge_candidates(&self, all_stats: &[SegmentSummary]) -> Option<Vec<u64>> {
@@ -163,10 +162,10 @@ impl CompactionPolicy for SimilarityAwarePolicy {
             }
         }
 
-        if let Some((i, j)) = best_pair {
-            if best_distance < self.overlap_threshold {
-                return Some(vec![all_stats[i].segment_id, all_stats[j].segment_id]);
-            }
+        if let Some((i, j)) = best_pair
+            && best_distance < self.overlap_threshold
+        {
+            return Some(vec![all_stats[i].segment_id, all_stats[j].segment_id]);
         }
 
         None

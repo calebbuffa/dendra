@@ -7,7 +7,7 @@ pub(crate) struct SizeOf {
 }
 
 pub(crate) fn size_of_vec<T>(vector: &[T]) -> SizeOf {
-    let bytes = vector.len() * std::mem::size_of::<T>();
+    let bytes = std::mem::size_of_val(vector);
     SizeOf {
         bytes,
         kilobytes: bytes / 1024,
