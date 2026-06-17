@@ -35,7 +35,7 @@ fn main() {
     // Use deterministic clustered vectors on-demand.
     // The query is exactly one vector that already exists in the dataset
     // (the vector at query_source_index).
-    let num_vectors = 1_000_000;
+    let num_vectors = 10_000_000;
     for (i, vec) in
         VectorGenerator::new(num_vectors, dimension, data_seed, cluster_count).enumerate()
     {
