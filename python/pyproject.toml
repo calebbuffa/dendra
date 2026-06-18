@@ -3,9 +3,9 @@ requires = ["maturin>=1.2,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "dendra"
+name = "engram"
 version = "0.1.0"
-description = "Fast Vector Database - High-performance vector search with Random Projection Forests"
+description = "engram: Bayesian LSH vector database with adaptive probabilistic routing"
 readme = "README.md"
 requires-python = ">=3.8"
 license = { text = "MIT" }
@@ -20,5 +20,5 @@ dependencies = ["numpy>=1.20"]
 
 
 [tool.maturin]
-module-name = "dendra"
+module-name = "engram"
 features = ["pyo3/extension-module"]

@@ -1,100 +1,80 @@
-# dendra
+# engram
 
-`dendra` is a simple vector database built around immutable, memory-mapped segments and random projection trees.
+`engram` is an LSM-inspired vector database that uses Locality-Sensitive Hashing (LSH) to route queries into sparse Bayesian experts for probabilistic candidate generation.
 
-## Design
+The current engine is built for high ingest throughput, predictable query latency, and simplicity:
 
-The current architecture combines an LSM-style ingest path with a Random Projection Forest (RPF) per sealed segment.
+- Mutable active segment for fast inserts.
+- Background sealing to immutable segments.
+- Segment-local Bayesian LSH index for candidate generation.
+- SQ8 payload store with sidecar files and memory-mapped read path.
 
-### High-Level Flow
+## Architecture
 
-```mermaid
-flowchart LR
-   User[User API\ninsert / query / load]
-   Memtable[SegmentBuilder\nmutable RAM buffer]
-   Flush[Flush / seal segment]
-   Segment[Immutable segment on disk]
-   MMap[Memory-mapped segment view]
+At a high level:
 
-   User --> Memtable
-   Memtable -->|capacity reached| Flush
-   Flush --> Segment
-   Segment --> MMap
-   MMap --> User
-```
+1. Inserts append to the active in-memory segment.
+2. When the segment reaches capacity, it is sealed in the background.
+3. Sealing builds a Bayesian LSH index and SQ8 store.
+4. Sealed segments are persisted and reopened through memory maps.
+5. Query-time routing selects segments, then candidates, then ADC reranks top-k.
 
-### Write Path
+### Indexing model
 
-```mermaid
-flowchart TD
-   Insert[Insert vectors]
-   Builder[SegmentBuilder in RAM]
-   BuildIndex[Build RPF index]
-   WriteFiles[Write segment files]
-   Seal[Reopen as read-only view]
+Each immutable segment owns its own Bayesian LSH index.
 
-   Insert --> Builder
-   Builder -->|threshold reached| BuildIndex
-   BuildIndex --> WriteFiles
-   WriteFiles --> Seal
-```
+- Each table hashes vectors into signature buckets.
+- Each bucket stores Bayesian expert statistics (Normal-Inverse-Gamma per expert dimension).
+- Querying probes exact and nearby signatures (bounded Hamming radius).
+- Candidate rows are scored by bucket Bayesian evidence plus vote support.
+- A smooth confidence function maps uncertainty to an adaptive candidate budget.
 
-### Read Path
+Candidate fanout is bounded by min and max limits for latency control.
 
-```mermaid
-flowchart TD
-   Query[Query vector + top-k]
-   SegmentView[Memory-mapped segment]
-   Forest[RPF traversal]
-   Candidates[Candidate row ranges]
-   Distance[Distance computation]
-   Results[Top-k results]
+### Query routing model
 
-   Query --> SegmentView --> Forest --> Candidates --> Distance --> Results
-```
+Since the DB relies on immutable sealed segments, naive segment selection would degrade performance as segments grow. To mitigate this `engram` uses a two-stage process:
 
-## On-Disk Layout
+1. **Route to relevant sealed segments**
+   - For each sealed segment, compute a segment-level Bayesian score from its root statistics.
+   - Convert scores to normalized routing mass.
+   - Select the smallest set of segments whose cumulative mass reaches the target `(1 - delta)`.
 
-Each sealed segment is stored as a directory with four files:
+2. **Route within each selected segment**
+   - Run that segment’s Bayesian LSH index to generate candidate rows.
+   - Probe exact + nearby signatures (bounded Hamming radius).
+   - Score candidates with bucket Bayesian evidence plus table-vote support.
+   - Apply smooth adaptive fanout (bounded by `lsh_min_candidates` and `lsh_max_candidates`).
 
-- `metadata.bin` - segment schema header and counts
-- `vectors.bin` - vector payload
-- `ids.bin` - external id column
-- `index.bin` - RPF forest and per-tree lookup tables
+3. **Rerank and return**
+   - Rerank selected candidates with distance/ADC.
+   - Merge across selected segments and return top-k.
 
-The segment format is intentionally small and versioned so future codecs and storage changes can be added without breaking old data.
+4. **Fresh data path**
+   - The active in-memory segment is scanned directly, so newly inserted vectors are query-visible before sealing.
 
-## In-Memory Model
+### Storage model
 
-### Segment
+Each sealed segment directory contains:
 
-- `vectors` - contiguous vector payload
-- `external_ids` - row-aligned user ids
-- `dim` - vector dimension
-- `index` - random projection forest for candidate generation
+- segment.bin: versioned segment metadata payload.
+- ids.bin: row-aligned external ids sidecar.
+- codes.bin: SQ8 codes sidecar.
 
-### RPF
+The ids and codes sidecars are used through memory maps when possible.
 
-- Each tree owns its own row lookup table.
-- Leaf nodes point to contiguous row ranges inside the tree-local lookup.
-- Candidate generation deduplicates by tree index and row range.
-
-## Current Implementation Status
+## Current status
 
 Implemented:
 
-- segment build and query path
-- sealed segment file layout
-- versioned headers for segment and forest files
-- per-tree lookup ownership in the RPF
+- Bayesian LSH index build and query path.
+- Bucket-level Bayesian experts.
+- Confidence-based smooth adaptive candidate budgeting.
+- SQ8 segment storage with sidecar persistence.
+- Memory-mapped sealed-segment read path.
+- Background sealing and compaction workflow.
 
-Planned next:
+Not yet implemented:
 
-- store lifecycle and recovery
-- quantized vector codecs
-
-## Notes
-
-- The current codebase keeps vectors in `f32` for now.
-- Quantization is planned, but it is not yet the default storage format.
-- Delete support is not implemented yet.
+- Deletes/tombstones.
+- Full WAL-backed crash recovery for active in-memory state.

@@ -1,9 +1,9 @@
-"""Simple example of using dendra with NumPy."""
+"""Simple example of using engram with NumPy."""
 
 import tempfile
 
 import numpy as np
-from dendra import VectorDB
+from engram import VectorDB
 
 
 def main():
@@ -15,8 +15,8 @@ def main():
         db = VectorDB(
             dir=tmpdir,
             dimension=128,
-            leaf_size=32,
-            num_trees=4,
+            lsh_tables=8,
+            lsh_bits=16,
             seed=42,
         )
 

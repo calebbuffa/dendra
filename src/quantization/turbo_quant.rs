@@ -7,13 +7,13 @@
 //! Both algorithms are data-oblivious (online) and suitable for applications like
 //! KV cache compression and nearest neighbor search (Section 4.4).
 
-use crate::math::{
-    beta_pdf, dot_packed_signs, dot_scaled, l2_norm, mat_t_vec_mul, mat_vec_mul,
-    random_orthogonal_matrix, random_projection_matrix, trapezoid,
-};
 use crate::quantization::{
     Dequantizer, QuantizeError, Quantizer,
     bitpack::{pack_indices, unpack_indices},
+};
+use crate::quantization::math::{
+    batch_mat_mul, batch_mat_t_mul, beta_pdf, dot_packed_signs, dot_scaled, l2_norm,
+    mat_t_vec_mul, mat_vec_mul, random_orthogonal_matrix, random_projection_matrix, trapezoid,
 };
 use faer::Mat;
 use log::debug;
@@ -366,7 +366,7 @@ impl Quantizer for TurboQuant {
         for i in 0..n {
             let base = i * dim;
             let slice = &vectors[base..base + dim];
-            let norm = crate::math::l2_norm(slice);
+            let norm = l2_norm(slice);
             if norm == 0.0 {
                 return Err(QuantizeError::ZeroNormVector);
             }
@@ -383,7 +383,7 @@ impl Quantizer for TurboQuant {
 
         // Phase 2: rotate all vectors at once: rotated = Pi^T * unit_vectors
         let p2_start = std::time::Instant::now();
-        let rotated = crate::math::batch_mat_t_mul(&self.rotation, &unit_vectors, dim);
+        let rotated = batch_mat_t_mul(&self.rotation, &unit_vectors, dim);
         debug!(
             "  Phase 2 (batch_mat_t_mul rotation): {:.3}ms",
             p2_start.elapsed().as_secs_f64() * 1000.0
@@ -435,7 +435,7 @@ impl Quantizer for TurboQuant {
 
             // Compute MSE reconstructions in one batch: recon_unit = Pi * recon_rotated
             let p5a_start = std::time::Instant::now();
-            let recon_unit = crate::math::batch_mat_mul(&self.rotation, &recon_rotated, dim);
+            let recon_unit = batch_mat_mul(&self.rotation, &recon_rotated, dim);
             debug!(
                 "    5a (batch_mat_mul recon): {:.3}ms",
                 p5a_start.elapsed().as_secs_f64() * 1000.0
@@ -471,7 +471,7 @@ impl Quantizer for TurboQuant {
             // This single batch_mat_mul replaces the loop of n individual mat_vec_mul calls!
             // For n=100k, this is 100k->1 reduction in matrix multiply operations
             let p5c_start = std::time::Instant::now();
-            let all_projected = crate::math::batch_mat_mul(projection, &all_residuals, dim);
+            let all_projected = batch_mat_mul(projection, &all_residuals, dim);
             debug!(
                 "    5c (batch_mat_mul projection): {:.3}ms",
                 p5c_start.elapsed().as_secs_f64() * 1000.0

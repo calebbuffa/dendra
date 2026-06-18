@@ -1,11 +1,11 @@
-# dendra Python Bindings
+# engram Python Bindings
 
-High-performance vector search library for Python with Random Projection Forests.
+High-performance vector search library for Python with Bayesian LSH routing.
 
 ## Installation
 
 ```bash
-pip install dendra
+pip install engram
 ```
 
 Or build from source:
@@ -20,14 +20,14 @@ maturin develop
 
 ```python
 import numpy as np
-from dendra import VectorDB
+from engram import VectorDB
 
 # Create a database
 db = VectorDB(
     dir="./my_vectors",
     dimension=128,
-    leaf_size=32,
-    num_trees=4,
+    lsh_tables=8,
+    lsh_bits=16,
 )
 
 # Insert vectors
@@ -56,7 +56,7 @@ db2 = VectorDB.load("./my_vectors")
 
 ## API
 
-### VectorDB(dir, dimension, leaf_size=32, num_trees=4, seed=42, max_segment_capacity=100)
+### VectorDB(dir, dimension, lsh_tables=8, lsh_bits=16, seed=42, max_segment_capacity=100)
 
 Create or open a vector database.
 
@@ -64,8 +64,8 @@ Create or open a vector database.
 
 - `dir` (str): Directory to store database files
 - `dimension` (int): Vector dimension
-- `leaf_size` (int): RPF leaf size for index granularity
-- `num_trees` (int): Number of random projection trees
+- `lsh_tables` (int): Number of LSH tables
+- `lsh_bits` (int): Bits per LSH table signature
 - `seed` (int): Random seed for reproducibility
 - `max_segment_capacity` (int): Max MB per sealed segment
 

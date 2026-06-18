@@ -1,8 +1,7 @@
-use dendra::{
-    CompactionPolicyType, Query, RoutingPolicyType, VectorDB, VectorDBConfig, cosine_distance, math,
-};
+use engram::{EngramError, Query, QueryScratch, VectorDB, VectorDBConfig, cosine_distance};
 use env_logger;
-use rand::{SeedableRng, rngs::StdRng};
+use rand::{Rng, SeedableRng, rngs::StdRng};
+use rand_distr::{Distribution, StandardNormal};
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -13,14 +12,15 @@ fn main() {
         std::fs::remove_dir_all(&dir).unwrap();
     }
     let dimension = 128;
-    let config = VectorDBConfig::new(64, 2, 128, 42, 100, 2)
-        .with_compaction_policy(CompactionPolicyType::SimilarityAware {
-            overlap_threshold: 0.1,
-        })
-        .with_routing_policy(RoutingPolicyType::FlatTopK {
-            max_segments: 8,
-            min_segments: 2,
-        });
+    let config = VectorDBConfig::new(dimension, 42, 100, 2)
+        .with_lsh_tables(8)
+        .with_lsh_bits(16)
+        .with_lsh_dims_per_bit(8)
+        .with_lsh_probe_hamming_radius(1)
+        .with_lsh_bucket_expert_dims(4)
+        .with_lsh_min_candidates(384)
+        .with_lsh_max_candidates(2048)
+        .with_lsh_adaptive_gamma(2.2);
 
     let mut store = VectorDB::new(dir, config);
 
@@ -60,11 +60,12 @@ fn main() {
     let elapsed = start.elapsed();
     log::info!("Store save took: {:?}", elapsed);
 
-    let query = Query::new(query_vec, 100, cosine_distance, None);
-    let mut results = Vec::new();
+    let query = Query::new(query_vec, 100).with_metric(cosine_distance);
+    let mut scratch = QueryScratch::default();
+    let mut results = Vec::with_capacity(query.k());
 
     let query_start = Instant::now();
-    let _ = store.query(&query, &mut results).unwrap();
+    let _ = store.query(&query, &mut scratch, &mut results).unwrap();
     log::info!("Query took: {:?}", query_start.elapsed());
     log::info!("Found {} results", results.len());
     for (id, dist) in results.into_iter().take(10) {
@@ -89,7 +90,7 @@ impl VectorGenerator {
         let mut center_rng = StdRng::seed_from_u64(seed ^ 0xC1A0_5EED);
         let mut cluster_centers = Vec::with_capacity(cluster_count);
         for _ in 0..cluster_count {
-            cluster_centers.push(math::random_unit_vector(dim, &mut center_rng).unwrap());
+            cluster_centers.push(random_unit_vector(dim, &mut center_rng).unwrap());
         }
 
         Self {
@@ -115,14 +116,14 @@ impl Iterator for VectorGenerator {
         // Generate locality: vectors arrive in cluster blocks, not round-robin.
         let cluster_idx = (self.current / self.cluster_block_size) % self.cluster_count;
         let center = &self.cluster_centers[cluster_idx];
-        let noise = math::random_unit_vector(self.dim, &mut self.rng).unwrap();
+        let noise = random_unit_vector(self.dim, &mut self.rng).unwrap();
 
         // Blend cluster center + random noise, then renormalize.
         let mut vec = vec![0.0; self.dim];
         for i in 0..self.dim {
             vec[i] = 0.85 * center[i] + 0.15 * noise[i];
         }
-        let norm = math::l2_norm(&vec);
+        let norm = l2_norm(&vec);
         if norm > 0.0 {
             for v in &mut vec {
                 *v /= norm;
@@ -138,4 +139,36 @@ fn vector_at_index(index: usize, dim: usize, seed: u64, cluster_count: usize) ->
     VectorGenerator::new(index + 1, dim, seed, cluster_count)
         .nth(index)
         .unwrap()
+}
+
+fn random_standard_normal_vector(dim: usize, rng: &mut impl Rng) -> Vec<f32> {
+    (0..dim)
+        .map(|_| {
+            let x: f32 = StandardNormal.sample(rng);
+            x
+        })
+        .collect()
+}
+
+fn random_unit_vector(dim: usize, rng: &mut impl Rng) -> Result<Vec<f32>, EngramError> {
+    let mut v = random_standard_normal_vector(dim, rng);
+    normalize(&mut v)?;
+    Ok(v)
+}
+
+/// Normalize vector in-place.
+fn normalize(a: &mut [f32]) -> Result<(), EngramError> {
+    let norm = l2_norm(a);
+    if norm == 0.0 {
+        return Err(EngramError::ZeroNormVector);
+    }
+    let inv_norm = 1.0 / norm;
+    for x in a.iter_mut() {
+        *x *= inv_norm;
+    }
+    Ok(())
+}
+
+fn l2_norm(a: &[f32]) -> f32 {
+    a.iter().map(|x| x * x).sum::<f32>().sqrt()
 }

@@ -4,8 +4,7 @@
 //! - TurboQuantAdapter: Wraps TurboQuant (MSE and InnerProduct modes)
 //! - NoOpQuantizer: Pass-through for disabled quantization
 
-use super::{QuantizeError, Quantizer, Dequantizer, TurboQuant, TurboQuantMode};
-use crate::math;
+use super::{Dequantizer, QuantizeError, Quantizer, TurboQuant, TurboQuantMode};
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 
@@ -98,8 +97,8 @@ impl Quantizer for TurboQuantAdapter {
     }
 
     fn serialize(&self, writer: &mut dyn Write) -> Result<(), QuantizeError> {
-        let encoded = serde_json::to_vec(self)
-            .map_err(|e| QuantizeError::Serialization(e.to_string()))?;
+        let encoded =
+            serde_json::to_vec(self).map_err(|e| QuantizeError::Serialization(e.to_string()))?;
         writer.write_all(&encoded)?;
         Ok(())
     }
@@ -168,3 +167,4 @@ impl Dequantizer for NoOpQuantizer {
         out.copy_from_slice(src);
         Ok(())
     }
+}

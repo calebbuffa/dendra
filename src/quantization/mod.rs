@@ -1,14 +1,13 @@
-mod adapter;
+/// NOT CURRENTLY USED. For me to experiment with.
+
 mod bitpack;
-mod qjl;
+mod math;
 mod turbo_quant;
 
-use crate::distance::MetricFn;
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use thiserror::Error;
 
-pub use adapter::{NoOpQuantizer, TurboQuantAdapter};
 pub use turbo_quant::{TurboQuant, TurboQuantConfig, TurboQuantMode};
 
 #[derive(Error, Debug)]
@@ -134,6 +133,12 @@ pub trait Quantizer: Send + Sync {
     }
 
     fn bytes_per_vector(&self) -> usize;
+
+    fn score(&self, _a: &[u8], _b: &[u8]) -> Result<f32, QuantizeError> {
+        Err(QuantizeError::UnsupportedMethod(
+            "score is not implemented for this quantizer".to_string(),
+        ))
+    }
 
     fn serialize(&self, writer: &mut dyn Write) -> Result<(), QuantizeError> {
         let _ = writer;
